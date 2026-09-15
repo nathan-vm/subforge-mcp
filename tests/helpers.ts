@@ -1,0 +1,69 @@
+import type { TestContext } from "node:test";
+
+/**
+ * A minimal stand-in for the MCP SDK's `RequestHandlerExtra` that each tool
+ * handler receives. The handlers under test only ever call
+ * `extra.sendNotification(...)` (via `createStepNotifier`) and read
+ * `extra._meta?.progressToken`, so that's all this fake needs to provide.
+ */
+export function makeExtra(meta?: Record<string, unknown>) {
+  const notifications: unknown[] = [];
+  const extra = {
+    sendNotification: async (n: unknown) => {
+      notifications.push(n);
+    },
+    sendRequest: async () => {
+      throw new Error("sendRequest is not implemented in tests");
+    },
+    signal: new AbortController().signal,
+    requestId: "test-request",
+    _meta: meta,
+  };
+  return { extra: extra as any, notifications };
+}
+
+export function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+  });
+}
+
+export interface FetchCall {
+  url: string;
+  init?: RequestInit;
+}
+
+/**
+ * Installs a `fetch` mock for the duration of one test (auto-restored by
+ * node:test's per-test MockTracker) that dispatches based on which LM Studio
+ * REST endpoint is being hit. Any call to an endpoint without a configured
+ * handler throws loudly, so an unexpected request (e.g. `chat` calling
+ * `/v1/chat/completions` despite a not-loaded model) fails the test instead
+ * of silently succeeding against real state.
+ */
+export function mockFetch(
+  t: TestContext,
+  handlers: {
+    models?: () => Response | Promise<Response>;
+    chatCompletions?: (body: any) => Response | Promise<Response>;
+  }
+): FetchCall[] {
+  const calls: FetchCall[] = [];
+  t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, init });
+    if (url.endsWith("/api/v0/models")) {
+      if (!handlers.models) throw new Error(`Unexpected fetch call to ${url}`);
+      return handlers.models();
+    }
+    if (url.endsWith("/v1/chat/completions")) {
+      if (!handlers.chatCompletions) throw new Error(`Unexpected fetch call to ${url}`);
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      return handlers.chatCompletions(body);
+    }
+    throw new Error(`Unmocked fetch call to ${url}`);
+  });
+  return calls;
+}

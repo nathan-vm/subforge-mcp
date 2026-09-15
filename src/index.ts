@@ -32,16 +32,16 @@ function createStepNotifier(extra: ToolExtra) {
   };
 }
 
-const BASE_URL = (process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234").replace(/\/$/, "");
+export const BASE_URL = (process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234").replace(/\/$/, "");
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
 }
 
-const sessions = new Map<string, ChatMessage[]>();
+export const sessions = new Map<string, ChatMessage[]>();
 
-async function lmFetch(path: string, init?: RequestInit): Promise<any> {
+export async function lmFetch(path: string, init?: RequestInit): Promise<any> {
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, init);
@@ -67,7 +67,7 @@ interface LMStudioModel {
   [key: string]: unknown;
 }
 
-async function getLoadedModels(): Promise<LMStudioModel[]> {
+export async function getLoadedModels(): Promise<LMStudioModel[]> {
   const data = await lmFetch("/api/v0/models");
   const models: LMStudioModel[] = data.data ?? [];
   return models.filter((m) => m.state === "loaded");
@@ -103,7 +103,16 @@ function getLmStudioClient(): LMStudioClient {
   return lmStudioClient;
 }
 
-function describeLmStudioWsError(err: unknown): string {
+/**
+ * Test-only injection point: lets the test suite substitute a fake
+ * LMStudioClient (mocking the WebSocket SDK) without ever constructing a
+ * real one. Not used by production code paths.
+ */
+export function __setLmStudioClientForTesting(client: LMStudioClient | undefined): void {
+  lmStudioClient = client;
+}
+
+export function describeLmStudioWsError(err: unknown): string {
   // A genuine connection failure (e.g. LM Studio not running) surfaces as an
   // AggregateError with code ECONNREFUSED and an empty `message`. Other SDK
   // errors (e.g. load guardrails, bad model key) carry a real message that
@@ -117,7 +126,7 @@ function describeLmStudioWsError(err: unknown): string {
   return `LM Studio request failed: ${message}`;
 }
 
-const server = new McpServer(
+export const server = new McpServer(
   {
     name: "subforge-mcp",
     version: "0.1.0",
@@ -129,6 +138,23 @@ const server = new McpServer(
   }
 );
 
+export async function listModelsHandler(_args: Record<string, never>, extra: ToolExtra) {
+  const notify = createStepNotifier(extra);
+  await notify("Checking LM Studio for loaded models...");
+  const loaded = await getLoadedModels();
+  await notify(`Found ${loaded.length} loaded model(s).`);
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: loaded.length
+          ? loaded.map((m) => m.id).join("\n")
+          : "No models are currently loaded in LM Studio. Load a model in the LM Studio app first, then try again.",
+      },
+    ],
+  };
+}
+
 server.registerTool(
   "list_models",
   {
@@ -136,23 +162,76 @@ server.registerTool(
     description: "List models currently loaded into memory in the local LM Studio server.",
     inputSchema: {},
   },
-  async (_args, extra) => {
-    const notify = createStepNotifier(extra);
-    await notify("Checking LM Studio for loaded models...");
-    const loaded = await getLoadedModels();
-    await notify(`Found ${loaded.length} loaded model(s).`);
-    return {
-      content: [
-        {
-          type: "text",
-          text: loaded.length
-            ? loaded.map((m) => m.id).join("\n")
-            : "No models are currently loaded in LM Studio. Load a model in the LM Studio app first, then try again.",
-        },
-      ],
-    };
-  }
+  listModelsHandler
 );
+
+interface ChatArgs {
+  message: string;
+  model: string;
+  session_id?: string;
+  system_prompt?: string;
+  temperature?: number;
+  max_tokens?: number;
+}
+
+export async function chatHandler(
+  { message, model, session_id, system_prompt, temperature, max_tokens }: ChatArgs,
+  extra: ToolExtra
+) {
+  const notify = createStepNotifier(extra);
+  const key = session_id ?? "default";
+  let history = sessions.get(key);
+  if (!history) {
+    history = [];
+    if (system_prompt) history.push({ role: "system", content: system_prompt });
+    sessions.set(key, history);
+  }
+
+  await notify(`Verifying model '${model}' is loaded...`);
+  const loaded = await getLoadedModels();
+  if (!loaded.some((m) => m.id === model)) {
+    const loadedList = loaded.length
+      ? loaded.map((m) => m.id).join(", ")
+      : "(none currently loaded)";
+    throw new Error(
+      `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}. ` +
+        `Load '${model}' in the LM Studio app first — this tool will not trigger an implicit load.`
+    );
+  }
+
+  history.push({ role: "user", content: message });
+
+  await notify(`Sending request to LM Studio (${history.length} messages in history)...`);
+
+  let elapsedSeconds = 0;
+  const heartbeat = setInterval(() => {
+    elapsedSeconds += 3;
+    void notify(`Still waiting for a response... (${elapsedSeconds}s elapsed)`);
+  }, 3000);
+
+  let data: any;
+  try {
+    data = await lmFetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: history,
+        temperature: temperature ?? 0.7,
+        ...(max_tokens ? { max_tokens } : {}),
+      }),
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
+
+  const reply = data.choices?.[0]?.message?.content ?? "";
+  history.push({ role: "assistant", content: reply });
+
+  await notify(`Received reply (${reply.length} characters).`);
+
+  return { content: [{ type: "text" as const, text: reply }] };
+}
 
 server.registerTool(
   "chat",
@@ -169,62 +248,131 @@ server.registerTool(
       max_tokens: z.number().int().positive().optional(),
     },
   },
-  async ({ message, model, session_id, system_prompt, temperature, max_tokens }, extra) => {
-    const notify = createStepNotifier(extra);
-    const key = session_id ?? "default";
-    let history = sessions.get(key);
-    if (!history) {
-      history = [];
-      if (system_prompt) history.push({ role: "system", content: system_prompt });
-      sessions.set(key, history);
-    }
-
-    await notify(`Verifying model '${model}' is loaded...`);
-    const loaded = await getLoadedModels();
-    if (!loaded.some((m) => m.id === model)) {
-      const loadedList = loaded.length
-        ? loaded.map((m) => m.id).join(", ")
-        : "(none currently loaded)";
-      throw new Error(
-        `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}. ` +
-          `Load '${model}' in the LM Studio app first — this tool will not trigger an implicit load.`
-      );
-    }
-
-    history.push({ role: "user", content: message });
-
-    await notify(`Sending request to LM Studio (${history.length} messages in history)...`);
-
-    let elapsedSeconds = 0;
-    const heartbeat = setInterval(() => {
-      elapsedSeconds += 3;
-      void notify(`Still waiting for a response... (${elapsedSeconds}s elapsed)`);
-    }, 3000);
-
-    let data: any;
-    try {
-      data = await lmFetch("/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model,
-          messages: history,
-          temperature: temperature ?? 0.7,
-          ...(max_tokens ? { max_tokens } : {}),
-        }),
-      });
-    } finally {
-      clearInterval(heartbeat);
-    }
-
-    const reply = data.choices?.[0]?.message?.content ?? "";
-    history.push({ role: "assistant", content: reply });
-
-    await notify(`Received reply (${reply.length} characters).`);
-
-    return { content: [{ type: "text", text: reply }] };
-  }
+  chatHandler
 );
+
+interface LoadModelArgs {
+  model: string;
+  ttl_seconds?: number;
+}
+
+export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, extra: ToolExtra) {
+  const notify = createStepNotifier(extra);
+
+  await notify("Checking whether the connected client supports elicitation...");
+  const clientCapabilities = server.server.getClientCapabilities();
+  if (!clientCapabilities?.elicitation) {
+    throw new Error(
+      "The connected MCP client did not declare the 'elicitation' capability, so load_model cannot " +
+        "obtain consent to load a model. Refusing to load anything. Connect with a client that " +
+        "supports elicitation/create to use this tool."
+    );
+  }
+
+  const client = getLmStudioClient();
+
+  await notify(`Looking up downloaded LM Studio models to validate '${model}'...`);
+  let downloaded: LLMInfo[];
+  try {
+    downloaded = await client.system.listDownloadedModels("llm");
+  } catch (err) {
+    throw new Error(describeLmStudioWsError(err));
+  }
+
+  const match = downloaded.find((m) => m.modelKey === model || m.path === model);
+  if (!match) {
+    const available = downloaded.length ? downloaded.map((m) => m.modelKey).join(", ") : "(none downloaded)";
+    throw new Error(`Model '${model}' was not found among downloaded LM Studio models. Downloaded models: ${available}`);
+  }
+
+  await notify(`Checking whether '${match.modelKey}' is already loaded...`);
+  let loadedInstances: LLM[];
+  try {
+    loadedInstances = await client.llm.listLoaded();
+  } catch (err) {
+    throw new Error(describeLmStudioWsError(err));
+  }
+  const alreadyLoaded = loadedInstances.find((m) => m.path === match.path || m.modelKey === match.modelKey);
+  if (alreadyLoaded) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Model '${match.modelKey}' is already loaded (identifier '${alreadyLoaded.identifier}'). No action needed; skipping elicitation.`,
+        },
+      ],
+    };
+  }
+
+  const sizeGb = (match.sizeBytes / 1024 ** 3).toFixed(2);
+  await notify(`Requesting user confirmation to load '${match.modelKey}' (${sizeGb} GB)...`);
+  const elicitResult = await server.server.elicitInput({
+    mode: "form",
+    message:
+      `Load model '${match.modelKey}' (${sizeGb} GB) into LM Studio memory? ` +
+      `This will consume RAM/VRAM${
+        ttl_seconds
+          ? ` and will auto-unload after ${ttl_seconds}s of inactivity.`
+          : " and will remain loaded until explicitly unloaded."
+      }`,
+    requestedSchema: {
+      type: "object",
+      properties: {
+        confirm: {
+          type: "boolean",
+          title: "Load model",
+          description: `Load '${match.modelKey}' into memory now?`,
+          default: true,
+        },
+      },
+      required: ["confirm"],
+    },
+  });
+
+  if (elicitResult.action !== "accept" || elicitResult.content?.confirm !== true) {
+    const verb = elicitResult.action === "decline" ? "declined" : "cancelled";
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `User ${verb} loading model '${match.modelKey}'. No changes were made.`,
+        },
+      ],
+    };
+  }
+
+  await notify(`Loading '${match.modelKey}' into memory...`);
+  let lastReportedPercent = -1;
+  let llm: LLM;
+  try {
+    llm = await client.llm.load(match.modelKey, {
+      ttl: ttl_seconds,
+      verbose: false,
+      onProgress: (progress) => {
+        const percent = Math.round(progress * 100);
+        if (percent !== lastReportedPercent && percent % 10 === 0) {
+          lastReportedPercent = percent;
+          void notify(`Loading '${match.modelKey}'... ${percent}%`);
+        }
+      },
+    });
+  } catch (err) {
+    throw new Error(describeLmStudioWsError(err));
+  }
+
+  await notify(`Model '${llm.identifier}' loaded successfully.`);
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `Model '${match.modelKey}' loaded successfully as '${llm.identifier}'.` +
+          (ttl_seconds ? ` It will auto-unload after ${ttl_seconds}s of inactivity.` : ""),
+      },
+    ],
+  };
+}
 
 server.registerTool(
   "load_model",
@@ -245,124 +393,17 @@ server.registerTool(
         .describe("Idle time-to-live in seconds; LM Studio auto-unloads the model after this much inactivity"),
     },
   },
-  async ({ model, ttl_seconds }, extra) => {
-    const notify = createStepNotifier(extra);
-
-    await notify("Checking whether the connected client supports elicitation...");
-    const clientCapabilities = server.server.getClientCapabilities();
-    if (!clientCapabilities?.elicitation) {
-      throw new Error(
-        "The connected MCP client did not declare the 'elicitation' capability, so load_model cannot " +
-          "obtain consent to load a model. Refusing to load anything. Connect with a client that " +
-          "supports elicitation/create to use this tool."
-      );
-    }
-
-    const client = getLmStudioClient();
-
-    await notify(`Looking up downloaded LM Studio models to validate '${model}'...`);
-    let downloaded: LLMInfo[];
-    try {
-      downloaded = await client.system.listDownloadedModels("llm");
-    } catch (err) {
-      throw new Error(describeLmStudioWsError(err));
-    }
-
-    const match = downloaded.find((m) => m.modelKey === model || m.path === model);
-    if (!match) {
-      const available = downloaded.length ? downloaded.map((m) => m.modelKey).join(", ") : "(none downloaded)";
-      throw new Error(`Model '${model}' was not found among downloaded LM Studio models. Downloaded models: ${available}`);
-    }
-
-    await notify(`Checking whether '${match.modelKey}' is already loaded...`);
-    let loadedInstances: LLM[];
-    try {
-      loadedInstances = await client.llm.listLoaded();
-    } catch (err) {
-      throw new Error(describeLmStudioWsError(err));
-    }
-    const alreadyLoaded = loadedInstances.find((m) => m.path === match.path || m.modelKey === match.modelKey);
-    if (alreadyLoaded) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Model '${match.modelKey}' is already loaded (identifier '${alreadyLoaded.identifier}'). No action needed; skipping elicitation.`,
-          },
-        ],
-      };
-    }
-
-    const sizeGb = (match.sizeBytes / 1024 ** 3).toFixed(2);
-    await notify(`Requesting user confirmation to load '${match.modelKey}' (${sizeGb} GB)...`);
-    const elicitResult = await server.server.elicitInput({
-      mode: "form",
-      message:
-        `Load model '${match.modelKey}' (${sizeGb} GB) into LM Studio memory? ` +
-        `This will consume RAM/VRAM${
-          ttl_seconds
-            ? ` and will auto-unload after ${ttl_seconds}s of inactivity.`
-            : " and will remain loaded until explicitly unloaded."
-        }`,
-      requestedSchema: {
-        type: "object",
-        properties: {
-          confirm: {
-            type: "boolean",
-            title: "Load model",
-            description: `Load '${match.modelKey}' into memory now?`,
-            default: true,
-          },
-        },
-        required: ["confirm"],
-      },
-    });
-
-    if (elicitResult.action !== "accept" || elicitResult.content?.confirm !== true) {
-      const verb = elicitResult.action === "decline" ? "declined" : "cancelled";
-      return {
-        content: [
-          {
-            type: "text",
-            text: `User ${verb} loading model '${match.modelKey}'. No changes were made.`,
-          },
-        ],
-      };
-    }
-
-    await notify(`Loading '${match.modelKey}' into memory...`);
-    let lastReportedPercent = -1;
-    let llm: LLM;
-    try {
-      llm = await client.llm.load(match.modelKey, {
-        ttl: ttl_seconds,
-        verbose: false,
-        onProgress: (progress) => {
-          const percent = Math.round(progress * 100);
-          if (percent !== lastReportedPercent && percent % 10 === 0) {
-            lastReportedPercent = percent;
-            void notify(`Loading '${match.modelKey}'... ${percent}%`);
-          }
-        },
-      });
-    } catch (err) {
-      throw new Error(describeLmStudioWsError(err));
-    }
-
-    await notify(`Model '${llm.identifier}' loaded successfully.`);
-
-    return {
-      content: [
-        {
-          type: "text",
-          text:
-            `Model '${match.modelKey}' loaded successfully as '${llm.identifier}'.` +
-            (ttl_seconds ? ` It will auto-unload after ${ttl_seconds}s of inactivity.` : ""),
-        },
-      ],
-    };
-  }
+  loadModelHandler
 );
+
+export async function resetChatHandler({ session_id }: { session_id?: string }) {
+  if (session_id) {
+    sessions.delete(session_id);
+    return { content: [{ type: "text" as const, text: `Session '${session_id}' cleared.` }] };
+  }
+  sessions.clear();
+  return { content: [{ type: "text" as const, text: "All sessions cleared." }] };
+}
 
 server.registerTool(
   "reset_chat",
@@ -373,15 +414,15 @@ server.registerTool(
       session_id: z.string().optional().describe("Session to clear; omit to clear all sessions"),
     },
   },
-  async ({ session_id }) => {
-    if (session_id) {
-      sessions.delete(session_id);
-      return { content: [{ type: "text", text: `Session '${session_id}' cleared.` }] };
-    }
-    sessions.clear();
-    return { content: [{ type: "text", text: "All sessions cleared." }] };
-  }
+  resetChatHandler
 );
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+// Only start the stdio transport when this file is run directly (e.g. `node
+// dist/index.js` or via the `subforge-mcp` bin), not when it's imported as a
+// module by the test suite.
+const isEntryPoint = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
+
+if (isEntryPoint) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
