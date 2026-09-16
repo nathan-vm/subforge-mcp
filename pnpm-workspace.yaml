@@ -1,2 +1,2 @@
 minimumReleaseAgeExclude:
-  - '@types/node@22.20.3'
+  - "@types/node@22.20.3"
