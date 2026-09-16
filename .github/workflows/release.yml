@@ -26,7 +26,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
+          # main requires a PR for every update (branch ruleset), which
+          # blocks the default GITHUB_TOKEN push done by @semantic-release/git
+          # (it's attributed to github-actions[bot], not a bypassable actor
+          # on a personal repo). RELEASE_TOKEN is a fine-grained PAT
+          # (Contents: read/write only) belonging to a repo admin, who is
+          # on the ruleset's bypass list.
+          token: ${{ secrets.RELEASE_TOKEN }}
+          persist-credentials: true
 
       - uses: pnpm/action-setup@v4
         with:
