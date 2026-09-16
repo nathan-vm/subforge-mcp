@@ -424,6 +424,80 @@ server.registerTool(
   loadModelHandler,
 );
 
+interface UnloadModelArgs {
+  model: string;
+}
+
+export async function unloadModelHandler({ model }: UnloadModelArgs, extra: ToolExtra) {
+  const notify = createStepNotifier(extra);
+  const client = getLmStudioClient();
+
+  await notify(`Checking whether '${model}' is loaded...`);
+  let loadedInstances: LLM[];
+  try {
+    loadedInstances = await client.llm.listLoaded();
+  } catch (err) {
+    throw new Error(describeLmStudioWsError(err));
+  }
+
+  const match = loadedInstances.find(
+    (m) => m.identifier === model || m.modelKey === model || m.path === model,
+  );
+  if (!match) {
+    const loadedList = loadedInstances.length
+      ? loadedInstances.map((m) => m.identifier).join(", ")
+      : "(none currently loaded)";
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}.`,
+        },
+      ],
+    };
+  }
+
+  await notify(`Unloading '${match.identifier}'...`);
+  try {
+    await client.llm.unload(match.identifier);
+  } catch (err) {
+    throw new Error(describeLmStudioWsError(err));
+  }
+
+  await notify(`Model '${match.identifier}' unloaded successfully.`);
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `Model '${match.identifier}' unloaded successfully.`,
+      },
+    ],
+  };
+}
+
+server.registerTool(
+  "unload_model",
+  {
+    title: "Unload a model from LM Studio memory",
+    description:
+      "Explicitly unload a currently-loaded model from LM Studio memory. This is the counterpart to " +
+      "load_model. Unlike load_model, this does NOT require user consent via MCP elicitation: " +
+      "unloading only frees RAM/VRAM and is safely reversible (load it again any time), so it isn't " +
+      "gated behind a confirmation prompt. Returns a plain informative result (not an error) if the " +
+      "requested model isn't currently loaded.",
+    inputSchema: {
+      model: z
+        .string()
+        .describe(
+          "Model to unload — matched against a currently-loaded model's identifier, modelKey, or " +
+            "path (e.g. the identifier returned by load_model or list_models).",
+        ),
+    },
+  },
+  unloadModelHandler,
+);
+
 export async function resetChatHandler({ session_id }: { session_id?: string }) {
   if (session_id) {
     sessions.delete(session_id);

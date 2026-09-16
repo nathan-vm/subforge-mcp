@@ -43,12 +43,15 @@ claude mcp add subforge -- npx -y subforge-mcp
 | `list_models`   | List models currently loaded into memory in LM Studio                                                                                                                                                                       |
 | `chat`          | Send a message to a loaded model; keeps per-`session_id` conversation history                                                                                                                                               |
 | `load_model`    | Load a downloaded-but-unloaded model into memory — requires client elicitation support and explicit user consent                                                                                                            |
+| `unload_model`  | Unload a currently-loaded model from memory — the counterpart to `load_model`; does not require elicitation/consent                                                                                                         |
 | `reset_chat`    | Clear conversation history for a session (or all sessions)                                                                                                                                                                  |
 | `delegate_task` | Delegate a mechanical, bounded coding task (rename, find/replace) to a local model running its own read/list/edit-file loop against `dir` — file content never enters the calling conversation, only the final summary does |
 
 `chat` and `load_model` never implicitly load a model: `chat` refuses if the
 requested model isn't already loaded, and `load_model` is the only tool that
-can bring one into memory, gated behind an MCP elicitation prompt.
+can bring one into memory, gated behind an MCP elicitation prompt. `unload_model`
+is exempt from that gate by design — freeing memory is low-risk and reversible
+(load the model again any time), so it doesn't ask for consent.
 
 ## Delegating tasks to a local model
 
