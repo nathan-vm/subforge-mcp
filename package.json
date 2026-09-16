@@ -3,15 +3,54 @@
   "version": "0.1.0",
   "description": "MCP server for local LM Studio models",
   "type": "module",
+  "license": "MIT",
+  "author": "Nathan Marcelino",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nathan-vm/subforge-mcp.git"
+  },
+  "homepage": "https://github.com/nathan-vm/subforge-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/nathan-vm/subforge-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "lm-studio",
+    "llm"
+  ],
   "bin": {
     "subforge-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=11"
+  },
   "scripts": {
+    "prepare": "husky",
     "build": "tsc",
+    "prepublishOnly": "pnpm run build",
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "test": "node --test",
-    "typecheck": "tsc -p tsconfig.test.json"
+    "typecheck": "tsc -p tsconfig.test.json",
+    "lint": "oxlint --type-aware .",
+    "lint:fix": "oxlint --type-aware --fix .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "lint-staged": {
+    "*.ts": [
+      "oxlint --type-aware --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": "prettier --write"
   },
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
@@ -19,10 +58,17 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/git": "^11.0.1",
     "@types/node": "^22.20.3",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.5.1",
+    "oxlint": "^1.83.0",
+    "oxlint-tsgolint": "^7.0.2001",
+    "prettier": "^3.9.6",
+    "semantic-release": "^25.0.9",
     "typescript": "^7.0.2"
-  },
-  "engines": {
-    "pnpm": ">=11"
   }
 }

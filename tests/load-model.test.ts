@@ -43,15 +43,24 @@ test("load_model refuses when the connected client does not support elicitation"
   const listDownloaded = t.mock.fn(async () => [] as FakeDownloaded[]);
   __setLmStudioClientForTesting({
     system: { listDownloadedModels: listDownloaded },
-    llm: { listLoaded: async () => [], load: async () => { throw new Error("unused"); } },
+    llm: {
+      listLoaded: async () => [],
+      load: async () => {
+        throw new Error("unused");
+      },
+    },
   } as any);
   const { extra } = makeExtra();
 
   await assert.rejects(
     () => loadModelHandler({ model: "m1" }, extra),
-    /did not declare the 'elicitation' capability/
+    /did not declare the 'elicitation' capability/,
   );
-  assert.equal(listDownloaded.mock.calls.length, 0, "should refuse before ever contacting LM Studio");
+  assert.equal(
+    listDownloaded.mock.calls.length,
+    0,
+    "should refuse before ever contacting LM Studio",
+  );
 });
 
 test("load_model short-circuits with no elicitation when the model is already loaded", async (t) => {
@@ -63,7 +72,7 @@ test("load_model short-circuits with no elicitation when the model is already lo
     fakeClient({
       downloaded: [{ modelKey: "m1", path: "/models/m1", sizeBytes: 1_000_000_000 }],
       loaded: [{ modelKey: "m1", path: "/models/m1", identifier: "m1:0" }],
-    })
+    }),
   );
   const { extra } = makeExtra();
 
@@ -84,7 +93,7 @@ test("load_model returns a non-error 'declined' result and never loads when the 
       downloaded: [{ modelKey: "m1", path: "/models/m1", sizeBytes: 1_000_000_000 }],
       loaded: [],
       load,
-    })
+    }),
   );
   const { extra } = makeExtra();
 
@@ -102,13 +111,15 @@ test("load_model invokes client.llm.load when the user accepts", async (t) => {
     action: "accept",
     content: { confirm: true },
   }));
-  const load = t.mock.fn(async (modelKey: string, _options?: unknown) => ({ identifier: `${modelKey}:1` }));
+  const load = t.mock.fn(async (modelKey: string, _options?: unknown) => ({
+    identifier: `${modelKey}:1`,
+  }));
   __setLmStudioClientForTesting(
     fakeClient({
       downloaded: [{ modelKey: "m1", path: "/models/m1", sizeBytes: 1_000_000_000 }],
       loaded: [],
       load,
-    })
+    }),
   );
   const { extra } = makeExtra();
 
@@ -127,6 +138,6 @@ test("load_model rejects with a clear message when the model is not among downlo
 
   await assert.rejects(
     () => loadModelHandler({ model: "does-not-exist" }, extra),
-    /was not found among downloaded LM Studio models/
+    /was not found among downloaded LM Studio models/,
   );
 });

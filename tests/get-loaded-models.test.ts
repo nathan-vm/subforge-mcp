@@ -19,7 +19,7 @@ test("getLoadedModels filters to state === 'loaded' only", async (t) => {
 
   assert.deepEqual(
     loaded.map((m) => m.id),
-    ["model-a", "model-c"]
+    ["model-a", "model-c"],
   );
 });
 
