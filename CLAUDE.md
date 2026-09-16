@@ -20,6 +20,7 @@ pnpm run lint:fix
 - **Version is derived, not hand-edited.** `package.json#version` and `CHANGELOG.md` are written by semantic-release on merge (`.github/workflows/release.yml`) — never bump them by hand. `src/index.ts` reads the version at runtime from `package.json` rather than hardcoding it.
 - **Tests import `src/*.ts` directly** (not `dist/`) — Node's native TS support runs them without a build step. Keep `tests/helpers.ts` mocks in sync with any change to the `ToolExtra` shape in `src/index.ts`.
 - **No implicit LM Studio model loads.** `chat` refuses if the target model isn't already loaded; `load_model` is the only tool that loads one, and only behind an MCP elicitation prompt. Don't add a code path that loads a model without going through that.
+- **`delegate_task` never runs outside `dir`.** All three of its file tools (`read_file`/`list_dir`/`edit_file`) go through `safeResolvePath` — don't add a code path that lets the loop touch anything outside the caller-supplied directory, and never add a shell/Bash tool to its tool definitions. Tests for it use the `withTempDir` fixture in `tests/helpers.ts`, which creates and cleans up a real temp directory for exercising real filesystem reads/edits.
 
 ## CI shape
 

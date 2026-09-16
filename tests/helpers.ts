@@ -1,4 +1,7 @@
 import type { TestContext } from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 /**
  * A minimal stand-in for the MCP SDK's `RequestHandlerExtra` that each tool
@@ -64,4 +67,18 @@ export function mockFetch(
     throw new Error(`Unmocked fetch call to ${url}`);
   });
   return calls;
+}
+
+/**
+ * Creates a real temporary directory, runs `fn` with its path, and always
+ * removes it afterward — used by delegate_task tests that need a real
+ * filesystem for read_file/edit_file/list_dir to operate against.
+ */
+export async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(path.join(tmpdir(), "subforge-mcp-test-"));
+  try {
+    return await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -441,6 +443,299 @@ server.registerTool(
     },
   },
   resetChatHandler,
+);
+
+// --- delegate_task: a scoped, filesystem-grounded agentic loop that hands a ---
+// small mechanical coding task to a local model, keeping file contents and
+// the back-and-forth out of the calling conversation entirely.
+
+// Lexical-only path check: this does not resolve symlinks, so a symlink
+// inside `dir` that points outside it would not be caught here. That's
+// acceptable because `dir` is supplied by the user configuring this tool,
+// not by untrusted input. Separately (and structurally, not enforced by this
+// function): no Bash/shell tool is ever defined for the delegate_task loop,
+// so there is no way to escape `dir` via a shell command even if a path did.
+export function safeResolvePath(dir: string, requestedPath: string): string {
+  const rootDir = path.resolve(dir);
+  const candidate = path.resolve(rootDir, requestedPath);
+  const rel = path.relative(rootDir, candidate);
+  if (rel !== "" && (rel.startsWith(`..${path.sep}`) || rel === ".." || path.isAbsolute(rel))) {
+    throw new Error(`Path '${requestedPath}' escapes the allowed directory '${rootDir}'.`);
+  }
+  return candidate;
+}
+
+export const MAX_FILE_BYTES = 100 * 1024;
+
+const TOOL_DEFS = [
+  {
+    type: "function",
+    function: {
+      name: "list_dir",
+      description:
+        "List files and subdirectories directly inside a directory (non-recursive), relative to the task's root directory.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Directory path relative to the root directory. Use '.' for the root itself.",
+          },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_file",
+      description:
+        "Read the full text contents of a file, relative to the task's root directory. Fails if the file exceeds the size limit or does not exist.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path relative to the root directory." },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "edit_file",
+      description:
+        "Apply a search-and-replace edit to an existing text file: replaces exactly one occurrence of old_string with new_string. Fails loudly (no change made) if old_string is not found, or is found more than once — in that case, include more surrounding context in old_string to uniquely identify the location. Cannot create new files.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path relative to the root directory." },
+          old_string: {
+            type: "string",
+            description: "Exact text to find; must appear exactly once in the file.",
+          },
+          new_string: { type: "string", description: "Text to replace it with." },
+        },
+        required: ["path", "old_string", "new_string"],
+      },
+    },
+  },
+] as const;
+
+/**
+ * Executes one model-requested tool call against the filesystem, scoped to
+ * `rootDir`. Every ordinary failure (bad path, missing file, no/ambiguous
+ * match, bad JSON, unknown tool name) is caught and turned into an
+ * `"Error: ..."` string returned as the tool result — never thrown — so the
+ * agentic loop keeps going and the model gets a chance to self-correct.
+ */
+async function runTool(rootDir: string, name: string, argsJson: string): Promise<string> {
+  let args: any;
+  try {
+    args = JSON.parse(argsJson);
+  } catch (err) {
+    return `Error: invalid JSON arguments: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  try {
+    switch (name) {
+      case "list_dir": {
+        const resolved = safeResolvePath(rootDir, args.path);
+        const entries = await fs.readdir(resolved, { withFileTypes: true });
+        if (entries.length === 0) return "(empty directory)";
+        return entries
+          .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+          .sort()
+          .join("\n");
+      }
+      case "read_file": {
+        const resolved = safeResolvePath(rootDir, args.path);
+        const stat = await fs.stat(resolved);
+        if (stat.size > MAX_FILE_BYTES) {
+          return `Error: file exceeds the 100KB size guard (${stat.size} bytes): ${args.path}`;
+        }
+        return await fs.readFile(resolved, "utf8");
+      }
+      case "edit_file": {
+        const resolved = safeResolvePath(rootDir, args.path);
+        const stat = await fs.stat(resolved);
+        if (stat.size > MAX_FILE_BYTES) {
+          return `Error: file exceeds the 100KB size guard (${stat.size} bytes): ${args.path}`;
+        }
+        const content = await fs.readFile(resolved, "utf8");
+        const occurrences = content.split(args.old_string).length - 1;
+        if (occurrences === 0) {
+          return `Error: old_string not found in ${args.path}. Nothing was changed.`;
+        }
+        if (occurrences > 1) {
+          return (
+            `Error: old_string matches ${occurrences} times in ${args.path}; add more context ` +
+            `to uniquely identify it. Nothing was changed.`
+          );
+        }
+        const updated = content.replace(args.old_string, args.new_string);
+        await fs.writeFile(resolved, updated, "utf8");
+        return `Replaced 1 occurrence in ${args.path}.`;
+      }
+      default:
+        return `Error: unknown tool '${name}'.`;
+    }
+  } catch (err) {
+    return `Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function buildSystemPrompt(rootDir: string): string {
+  return (
+    `You are a coding assistant working inside the directory '${rootDir}'. You have three tools: ` +
+    `list_dir, read_file, and edit_file — all paths you pass to them must be relative to this ` +
+    `directory (e.g. 'src/utils.ts', or '.' for the root itself). Use them as needed to explore, ` +
+    `read, and make the requested change. When you are done — or if you determine no change is ` +
+    `needed — respond with a concise final text summary of what you did and make no further tool ` +
+    `calls.`
+  );
+}
+
+/** Strips a leaked `<think>...</think>` reasoning block from final model output, if present. */
+function stripThinking(content: string): string {
+  return content.replace(/<think>.*?<\/think>/gis, "").trim();
+}
+
+interface DelegateTaskArgs {
+  task: string;
+  model: string;
+  dir: string;
+  max_turns?: number;
+  think?: boolean;
+}
+
+export async function delegateTaskHandler(
+  { task, model, dir, max_turns = 15, think = true }: DelegateTaskArgs,
+  extra: ToolExtra,
+) {
+  const notify = createStepNotifier(extra);
+
+  await notify(`Validating directory '${dir}'...`);
+  const rootDir = path.resolve(dir);
+  const stat = await fs.stat(rootDir).catch(() => undefined);
+  if (!stat?.isDirectory()) {
+    throw new Error(`'${dir}' does not exist or is not a directory. Refusing to start.`);
+  }
+
+  await notify(`Verifying model '${model}' is loaded...`);
+  const loaded = await getLoadedModels();
+  if (!loaded.some((m) => m.id === model)) {
+    const loadedList = loaded.length
+      ? loaded.map((m) => m.id).join(", ")
+      : "(none currently loaded)";
+    throw new Error(
+      `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}. ` +
+        `Load '${model}' in the LM Studio app first.`,
+    );
+  }
+
+  const messages: any[] = [
+    { role: "system", content: buildSystemPrompt(rootDir) },
+    { role: "user", content: task },
+  ];
+
+  for (let turn = 1; turn <= max_turns; turn++) {
+    await notify(`Turn ${turn}/${max_turns}: sending request to LM Studio...`);
+    const data = await lmFetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages,
+        tools: TOOL_DEFS,
+        tool_choice: "auto",
+        temperature: 0.1,
+        ...(think === false ? { chat_template_kwargs: { enable_thinking: false } } : {}),
+      }),
+    });
+
+    const message = data.choices?.[0]?.message;
+    if (!message) throw new Error("LM Studio returned no message in choices[0].");
+    messages.push(message);
+
+    const toolCalls = message.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      await notify(`Model returned a final answer with no further tool calls.`);
+      return { content: [{ type: "text" as const, text: stripThinking(message.content ?? "") }] };
+    }
+
+    for (const call of toolCalls) {
+      await notify(`Turn ${turn}: calling ${call.function.name}(${call.function.arguments})`);
+      const resultText = await runTool(rootDir, call.function.name, call.function.arguments);
+      messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
+    }
+  }
+
+  await notify(`Reached max_turns (${max_turns}) without a final answer.`);
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `Ran out of turns (${max_turns}) before the model finished. It may have made partial ` +
+          `edits inside '${rootDir}' — review before relying on this. Increase max_turns to let it finish.`,
+      },
+    ],
+  };
+}
+
+server.registerTool(
+  "delegate_task",
+  {
+    title: "Delegate a mechanical coding task to a local model",
+    description:
+      "Delegate a small, mechanical, multi-step coding task (a variable rename, a boring " +
+      "find/replace, a boilerplate first-draft) to a local model in LM Studio. The local model " +
+      "runs its own read/list/edit-file loop directly against the filesystem, scoped to `dir` — " +
+      "file contents and the back-and-forth never enter this conversation, only the final summary " +
+      "does, so this saves context on rote work. Pass only a plain-language `task`, never file " +
+      "contents. Do NOT use this for anything requiring nuanced judgment, understanding " +
+      "relationships across many files, awareness of the current conversation, or high-stakes/hard-" +
+      "to-verify correctness — treat the local model as fast and free but low-reliability " +
+      "('Haiku-tier assistant, not a replacement'); review the summary before trusting it blindly. " +
+      "Scope tasks the way you'd scope a surgical 1-2 file edit, not a refactor spanning the tree.",
+    inputSchema: {
+      task: z
+        .string()
+        .min(1)
+        .describe(
+          "Plain-language instruction for the local model, e.g. 'rename variable foo to bar in " +
+            "utils.ts'. Do not include file contents — the model reads files itself via its own tools.",
+        ),
+      model: z.string().describe("LM Studio model id (from list_models); must already be loaded."),
+      dir: z
+        .string()
+        .describe(
+          "Absolute path to the directory the local model's file tools are scoped to. All " +
+            "read_file/list_dir/edit_file calls that would resolve outside this directory are refused.",
+        ),
+      max_turns: z
+        .number()
+        .int()
+        .positive()
+        .max(50)
+        .default(15)
+        .optional()
+        .describe("Cap on agentic-loop iterations before returning a best-effort summary."),
+      think: z
+        .boolean()
+        .default(true)
+        .optional()
+        .describe(
+          "Best-effort hint to disable the model's reasoning/thinking output for simple tasks " +
+            "(set false for speed). Not guaranteed — LM Studio's Jinja prompt template is the " +
+            "reliable control for this; see README.",
+        ),
+    },
+  },
+  delegateTaskHandler,
 );
 
 // Only start the stdio transport when this file is run directly (e.g. `node
