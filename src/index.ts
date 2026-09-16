@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -32,7 +33,10 @@ function createStepNotifier(extra: ToolExtra) {
   };
 }
 
-export const BASE_URL = (process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234").replace(/\/$/, "");
+export const BASE_URL = (process.env.LMSTUDIO_BASE_URL ?? "http://localhost:1234").replace(
+  /\/$/,
+  "",
+);
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -49,7 +53,7 @@ export async function lmFetch(path: string, init?: RequestInit): Promise<any> {
     throw new Error(
       `Cannot reach LM Studio at ${BASE_URL}. Is the local server running (LM Studio > Developer > Start Server)? ${
         err instanceof Error ? err.message : String(err)
-      }`
+      }`,
     );
   }
   if (!res.ok) {
@@ -126,16 +130,22 @@ export function describeLmStudioWsError(err: unknown): string {
   return `LM Studio request failed: ${message}`;
 }
 
+// dist/index.js sits one level below the package root, where package.json
+// (and its version, bumped by semantic-release on every release) lives.
+const packageJson = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
+
 export const server = new McpServer(
   {
     name: "subforge-mcp",
-    version: "0.1.0",
+    version: packageJson.version,
   },
   {
     capabilities: {
       logging: {},
     },
-  }
+  },
 );
 
 export async function listModelsHandler(_args: Record<string, never>, extra: ToolExtra) {
@@ -162,7 +172,7 @@ server.registerTool(
     description: "List models currently loaded into memory in the local LM Studio server.",
     inputSchema: {},
   },
-  listModelsHandler
+  listModelsHandler,
 );
 
 interface ChatArgs {
@@ -176,7 +186,7 @@ interface ChatArgs {
 
 export async function chatHandler(
   { message, model, session_id, system_prompt, temperature, max_tokens }: ChatArgs,
-  extra: ToolExtra
+  extra: ToolExtra,
 ) {
   const notify = createStepNotifier(extra);
   const key = session_id ?? "default";
@@ -195,7 +205,7 @@ export async function chatHandler(
       : "(none currently loaded)";
     throw new Error(
       `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}. ` +
-        `Load '${model}' in the LM Studio app first — this tool will not trigger an implicit load.`
+        `Load '${model}' in the LM Studio app first — this tool will not trigger an implicit load.`,
     );
   }
 
@@ -242,13 +252,19 @@ server.registerTool(
     inputSchema: {
       message: z.string().describe("User message to send"),
       model: z.string().describe("Model id, e.g. from list_models"),
-      session_id: z.string().default("default").describe("Conversation id to keep history separate across topics"),
-      system_prompt: z.string().optional().describe("System prompt; only applied when starting a new session"),
+      session_id: z
+        .string()
+        .default("default")
+        .describe("Conversation id to keep history separate across topics"),
+      system_prompt: z
+        .string()
+        .optional()
+        .describe("System prompt; only applied when starting a new session"),
       temperature: z.number().min(0).max(2).default(0.7).optional(),
       max_tokens: z.number().int().positive().optional(),
     },
   },
-  chatHandler
+  chatHandler,
 );
 
 interface LoadModelArgs {
@@ -265,7 +281,7 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
     throw new Error(
       "The connected MCP client did not declare the 'elicitation' capability, so load_model cannot " +
         "obtain consent to load a model. Refusing to load anything. Connect with a client that " +
-        "supports elicitation/create to use this tool."
+        "supports elicitation/create to use this tool.",
     );
   }
 
@@ -281,8 +297,12 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
 
   const match = downloaded.find((m) => m.modelKey === model || m.path === model);
   if (!match) {
-    const available = downloaded.length ? downloaded.map((m) => m.modelKey).join(", ") : "(none downloaded)";
-    throw new Error(`Model '${model}' was not found among downloaded LM Studio models. Downloaded models: ${available}`);
+    const available = downloaded.length
+      ? downloaded.map((m) => m.modelKey).join(", ")
+      : "(none downloaded)";
+    throw new Error(
+      `Model '${model}' was not found among downloaded LM Studio models. Downloaded models: ${available}`,
+    );
   }
 
   await notify(`Checking whether '${match.modelKey}' is already loaded...`);
@@ -292,7 +312,9 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
   } catch (err) {
     throw new Error(describeLmStudioWsError(err));
   }
-  const alreadyLoaded = loadedInstances.find((m) => m.path === match.path || m.modelKey === match.modelKey);
+  const alreadyLoaded = loadedInstances.find(
+    (m) => m.path === match.path || m.modelKey === match.modelKey,
+  );
   if (alreadyLoaded) {
     return {
       content: [
@@ -384,16 +406,20 @@ server.registerTool(
       "bring a new model into memory. Refuses if the connected client does not support elicitation, " +
       "or if the user declines.",
     inputSchema: {
-      model: z.string().describe("Model id/key to load, e.g. a modelKey or path from a downloaded models listing"),
+      model: z
+        .string()
+        .describe("Model id/key to load, e.g. a modelKey or path from a downloaded models listing"),
       ttl_seconds: z
         .number()
         .int()
         .positive()
         .optional()
-        .describe("Idle time-to-live in seconds; LM Studio auto-unloads the model after this much inactivity"),
+        .describe(
+          "Idle time-to-live in seconds; LM Studio auto-unloads the model after this much inactivity",
+        ),
     },
   },
-  loadModelHandler
+  loadModelHandler,
 );
 
 export async function resetChatHandler({ session_id }: { session_id?: string }) {
@@ -414,13 +440,14 @@ server.registerTool(
       session_id: z.string().optional().describe("Session to clear; omit to clear all sessions"),
     },
   },
-  resetChatHandler
+  resetChatHandler,
 );
 
 // Only start the stdio transport when this file is run directly (e.g. `node
 // dist/index.js` or via the `subforge-mcp` bin), not when it's imported as a
 // module by the test suite.
-const isEntryPoint = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
+const isEntryPoint =
+  process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
 
 if (isEntryPoint) {
   const transport = new StdioServerTransport();

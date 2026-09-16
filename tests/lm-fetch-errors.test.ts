@@ -17,7 +17,7 @@ test("a clear error is raised when LM Studio is unreachable (fetch throws)", asy
       assert.equal(err.message.includes("\n"), false);
       assert.equal(/\bat \S+\s*\(/.test(err.message), false);
       return true;
-    }
+    },
   );
 });
 
@@ -25,7 +25,7 @@ test("a clear error is raised for a non-OK HTTP response", async (t) => {
   t.mock.method(
     globalThis,
     "fetch",
-    async () => new Response("model not found", { status: 404, statusText: "Not Found" })
+    async () => new Response("model not found", { status: 404, statusText: "Not Found" }),
   );
 
   await assert.rejects(() => getLoadedModels(), /LM Studio request failed: 404/);

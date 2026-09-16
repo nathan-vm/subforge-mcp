@@ -23,11 +23,9 @@ export function makeExtra(meta?: Record<string, unknown>) {
 }
 
 export function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
-  });
+  const headers = new Headers(init.headers);
+  headers.set("Content-Type", "application/json");
+  return new Response(JSON.stringify(body), { status: 200, ...init, headers });
 }
 
 export interface FetchCall {
@@ -48,7 +46,7 @@ export function mockFetch(
   handlers: {
     models?: () => Response | Promise<Response>;
     chatCompletions?: (body: any) => Response | Promise<Response>;
-  }
+  },
 ): FetchCall[] {
   const calls: FetchCall[] = [];
   t.mock.method(globalThis, "fetch", async (input: unknown, init?: RequestInit) => {
@@ -60,7 +58,7 @@ export function mockFetch(
     }
     if (url.endsWith("/v1/chat/completions")) {
       if (!handlers.chatCompletions) throw new Error(`Unexpected fetch call to ${url}`);
-      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       return handlers.chatCompletions(body);
     }
     throw new Error(`Unmocked fetch call to ${url}`);
