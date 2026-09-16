@@ -13,6 +13,9 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  # OIDC token for npm trusted publishing (no NPM_TOKEN secret needed) —
+  # requires a Trusted Publisher configured on the package at npmjs.com
+  # (workflow filename: release.yml).
   id-token: write
 
 jobs:
@@ -36,10 +39,13 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Trusted publishing needs npm CLI >=11.5.1; setup-node's bundled npm
+      # is not guaranteed to satisfy that yet.
+      - run: npm install -g npm@latest
+
       - run: pnpm run build
 
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: pnpm exec semantic-release
