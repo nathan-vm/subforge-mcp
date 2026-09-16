@@ -25,5 +25,6 @@ pnpm run lint:fix
 
 - `ci.yml` (PRs + push to main): `lint` / `test` / `typecheck` in parallel, then `outdated` (allowed to fail) and `audit` (blocking) once those pass.
 - `pr-title-lint.yml`: rejects non-Conventional-Commit PR titles.
-- `dependabot-auto-merge.yml`: auto-merges Dependabot PRs that aren't major bumps, once CI is green.
 - `release.yml` (push to main only): build, then `semantic-release` (version, changelog, GitHub release, npm publish).
+
+Dependabot config (`dependabot.yml` + its auto-merge workflow) lives on the separate `dependabot-config` branch, not on `main` — see that branch's own PR.
