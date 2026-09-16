@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -867,9 +867,12 @@ server.registerTool(
 
 // Only start the stdio transport when this file is run directly (e.g. `node
 // dist/index.js` or via the `subforge-mcp` bin), not when it's imported as a
-// module by the test suite.
+// module by the test suite. Comparing realpaths (rather than the raw argv[1])
+// matters because npm/pnpm always invoke the bin through a symlink, which
+// import.meta.url resolves through but process.argv[1] does not — a naive
+// string comparison would never match for a globally-installed package.
 const isEntryPoint =
-  process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
+  process.argv[1] !== undefined && import.meta.url === `file://${realpathSync(process.argv[1])}`;
 
 if (isEntryPoint) {
   const transport = new StdioServerTransport();
