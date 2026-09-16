@@ -530,13 +530,34 @@ const TOOL_DEFS = [
  * match, bad JSON, unknown tool name) is caught and turned into an
  * `"Error: ..."` string returned as the tool result — never thrown — so the
  * agentic loop keeps going and the model gets a chance to self-correct.
+ * Successful `edit_file` calls record their (relative) path into
+ * `touchedFiles`, used as a fallback summary if the model's final answer
+ * comes back empty (see `delegateTaskHandler`).
  */
-async function runTool(rootDir: string, name: string, argsJson: string): Promise<string> {
+async function runTool(
+  rootDir: string,
+  name: string,
+  argsJson: string,
+  touchedFiles: Set<string>,
+): Promise<string> {
   let args: any;
   try {
     args = JSON.parse(argsJson);
   } catch (err) {
     return `Error: invalid JSON arguments: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  const requiredFieldsByTool: Record<string, string[]> = {
+    list_dir: ["path"],
+    read_file: ["path"],
+    edit_file: ["path", "old_string", "new_string"],
+  };
+  const required = requiredFieldsByTool[name];
+  if (required) {
+    const missing = required.filter((f) => typeof args?.[f] !== "string" || args[f] === "");
+    if (missing.length > 0) {
+      return `Error: missing or empty required argument(s) for ${name}: ${missing.join(", ")}.`;
+    }
   }
 
   try {
@@ -577,6 +598,7 @@ async function runTool(rootDir: string, name: string, argsJson: string): Promise
         }
         const updated = content.replace(args.old_string, args.new_string);
         await fs.writeFile(resolved, updated, "utf8");
+        touchedFiles.add(args.path);
         return `Replaced 1 occurrence in ${args.path}.`;
       }
       default:
@@ -601,6 +623,27 @@ function buildSystemPrompt(rootDir: string): string {
 /** Strips a leaked `<think>...</think>` reasoning block from final model output, if present. */
 function stripThinking(content: string): string {
   return content.replace(/<think>.*?<\/think>/gis, "").trim();
+}
+
+/**
+ * Builds the text returned to the caller once the model stops requesting
+ * tool calls. Some reasoning models (e.g. Qwen3 via LM Studio) put their
+ * entire response in a separate `reasoning_content` field and leave
+ * `message.content` blank/whitespace-only even on a fully successful task —
+ * so an empty `content` here does NOT mean nothing happened. Falls back to
+ * a summary built from the files the loop actually touched, rather than
+ * silently returning empty text.
+ */
+function finalSummary(content: string, touchedFiles: Set<string>): string {
+  const stripped = stripThinking(content);
+  if (stripped) return stripped;
+  if (touchedFiles.size === 0) {
+    return "Task completed with no summary text from the model, and no files were changed.";
+  }
+  return (
+    `Task completed with no summary text from the model. Files changed: ` +
+    `${[...touchedFiles].join(", ")}.`
+  );
 }
 
 interface DelegateTaskArgs {
@@ -640,6 +683,7 @@ export async function delegateTaskHandler(
     { role: "system", content: buildSystemPrompt(rootDir) },
     { role: "user", content: task },
   ];
+  const touchedFiles = new Set<string>();
 
   for (let turn = 1; turn <= max_turns; turn++) {
     await notify(`Turn ${turn}/${max_turns}: sending request to LM Studio...`);
@@ -663,12 +707,21 @@ export async function delegateTaskHandler(
     const toolCalls = message.tool_calls ?? [];
     if (toolCalls.length === 0) {
       await notify(`Model returned a final answer with no further tool calls.`);
-      return { content: [{ type: "text" as const, text: stripThinking(message.content ?? "") }] };
+      return {
+        content: [
+          { type: "text" as const, text: finalSummary(message.content ?? "", touchedFiles) },
+        ],
+      };
     }
 
     for (const call of toolCalls) {
       await notify(`Turn ${turn}: calling ${call.function.name}(${call.function.arguments})`);
-      const resultText = await runTool(rootDir, call.function.name, call.function.arguments);
+      const resultText = await runTool(
+        rootDir,
+        call.function.name,
+        call.function.arguments,
+        touchedFiles,
+      );
       messages.push({ role: "tool", tool_call_id: call.id, content: resultText });
     }
   }

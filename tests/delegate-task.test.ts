@@ -117,6 +117,59 @@ test("delegate_task reads a real file via read_file and returns the model's fina
   });
 });
 
+test("delegate_task falls back to a files-changed summary when the model's content is blank", async (t) => {
+  // Some reasoning models (e.g. Qwen3 via LM Studio) put their answer in a
+  // separate `reasoning_content` field and leave `message.content`
+  // whitespace-only even on success — this must not surface as empty text.
+  await withTempDir(async (dir) => {
+    const filePath = path.join(dir, "a.txt");
+    await writeFile(filePath, "const foo = 1;", "utf8");
+
+    const bodies: any[] = [];
+    mockFetch(t, {
+      models: () => jsonResponse({ data: [{ id: "m1", state: "loaded" }] }),
+      chatCompletions: (body) => {
+        bodies.push(body);
+        if (bodies.length === 1) {
+          return toolCallResponse("call_1", "edit_file", {
+            path: "a.txt",
+            old_string: "foo",
+            new_string: "bar",
+          });
+        }
+        return finalResponse("\n\n");
+      },
+    });
+    const { extra } = makeExtra();
+
+    const result = await delegateTaskHandler(
+      { task: "rename foo to bar in a.txt", model: "m1", dir },
+      extra,
+    );
+
+    assert.match(result.content[0].text, /no summary text/);
+    assert.match(result.content[0].text, /a\.txt/);
+
+    const onDisk = await readFile(filePath, "utf8");
+    assert.equal(onDisk, "const bar = 1;");
+  });
+});
+
+test("delegate_task falls back to a no-changes summary when content is blank and nothing was edited", async (t) => {
+  await withTempDir(async (dir) => {
+    mockFetch(t, {
+      models: () => jsonResponse({ data: [{ id: "m1", state: "loaded" }] }),
+      chatCompletions: () => finalResponse(""),
+    });
+    const { extra } = makeExtra();
+
+    const result = await delegateTaskHandler({ task: "look around", model: "m1", dir }, extra);
+
+    assert.match(result.content[0].text, /no summary text/);
+    assert.match(result.content[0].text, /no files were changed/);
+  });
+});
+
 test("delegate_task's edit_file mutates a real file on disk", async (t) => {
   await withTempDir(async (dir) => {
     const filePath = path.join(dir, "a.txt");
@@ -262,6 +315,31 @@ test("delegate_task refuses a path-escape attempt without crashing, and the loop
     const toolResultMsg = bodies[1].messages.find((m: any) => m.role === "tool");
     assert.match(toolResultMsg.content, /escapes the allowed directory/);
     assert.equal(result.content[0].text, "I cannot read outside the allowed directory.");
+  });
+});
+
+test("delegate_task reports missing/empty arguments clearly instead of a raw TypeError", async (t) => {
+  await withTempDir(async (dir) => {
+    const bodies: any[] = [];
+    mockFetch(t, {
+      models: () => jsonResponse({ data: [{ id: "m1", state: "loaded" }] }),
+      chatCompletions: (body) => {
+        bodies.push(body);
+        if (bodies.length === 1) {
+          return toolCallResponse("call_1", "edit_file", {});
+        }
+        return finalResponse("Realized I forgot the arguments; giving up.");
+      },
+    });
+    const { extra } = makeExtra();
+
+    await delegateTaskHandler({ task: "edit something", model: "m1", dir }, extra);
+
+    const toolResultMsg = bodies[1].messages.find((m: any) => m.role === "tool");
+    assert.match(toolResultMsg.content, /missing or empty required argument/);
+    assert.match(toolResultMsg.content, /path/);
+    assert.match(toolResultMsg.content, /old_string/);
+    assert.match(toolResultMsg.content, /new_string/);
   });
 });
 
