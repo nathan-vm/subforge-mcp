@@ -9,7 +9,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --test",
+    "typecheck": "tsc -p tsconfig.test.json"
   },
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
