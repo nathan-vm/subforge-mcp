@@ -62,7 +62,7 @@
     "@commitlint/config-conventional": "^21.2.2",
     "@semantic-release/changelog": "^7.0.0",
     "@semantic-release/git": "^11.0.1",
-    "@types/node": "^22.20.3",
+    "@types/node": "^26.5.1",
     "husky": "^9.1.7",
     "lint-staged": "^17.5.1",
     "oxlint": "^1.83.0",
