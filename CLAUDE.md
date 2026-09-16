@@ -25,6 +25,6 @@ pnpm run lint:fix
 
 - `ci.yml` (PRs + push to main): `lint` / `test` / `typecheck` in parallel, then `outdated` (allowed to fail) and `audit` (blocking) once those pass.
 - `pr-title-lint.yml`: rejects non-Conventional-Commit PR titles.
-- `release.yml` (push to main only): build, then `semantic-release` (version, changelog, GitHub release, npm publish).
+- `release.yml` (push to main only): build, then `semantic-release` (version, changelog, GitHub release, npm publish). Checks out with a `RELEASE_TOKEN` secret (fine-grained PAT, Contents read/write) instead of the default token, because main's branch ruleset requires a PR for every update and the default `github-actions[bot]` identity can't bypass it — the PAT authenticates as a repo admin, who's on the ruleset's bypass list.
 
 Dependabot config (`dependabot.yml` + its auto-merge workflow) lives on the separate `dependabot-config` branch, not on `main` — see that branch's own PR.
