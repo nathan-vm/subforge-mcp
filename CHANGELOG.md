@@ -1,3 +1,10 @@
+## [1.1.1](https://github.com/nathan-vm/subforge-mcp/compare/v1.1.0...v1.1.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* compare realpaths in the CLI entry-point check ([#12](https://github.com/nathan-vm/subforge-mcp/issues/12)) ([8a904d3](https://github.com/nathan-vm/subforge-mcp/commit/8a904d33680e67c0cef1c0b2e364a8276d803ac1))
+
 # [1.1.0](https://github.com/nathan-vm/subforge-mcp/compare/v1.0.0...v1.1.0) (2026-09-16)
 
 
