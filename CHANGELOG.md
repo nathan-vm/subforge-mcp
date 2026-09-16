@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/nathan-vm/subforge-mcp/compare/v1.0.0...v1.1.0) (2026-09-16)
+
+
+### Features
+
+* add delegate_task and unload_model ([#11](https://github.com/nathan-vm/subforge-mcp/issues/11)) ([75c8e99](https://github.com/nathan-vm/subforge-mcp/commit/75c8e9962a1d85a413b12e73039a45fe06af6498))
+
 # 1.0.0 (2026-09-16)
 
 
