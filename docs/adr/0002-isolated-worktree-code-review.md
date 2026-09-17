@@ -10,7 +10,7 @@ Separately, the `developer` sub-agent needs to not touch the orchestrator's own 
 
 ## Decision
 
-`developer` always works in its own git worktree (`.worktrees/<branch>`), created for the task. `code-reviewer` reviews that **same** worktree/branch — it does not create a separate checkout. The isolation that matters for review quality is the agent's *context*, not the filesystem: `code-reviewer` is spawned as a fresh agent (not a fork of the orchestrator or developer conversation) and is handed only a branch/worktree name or PR number, never the plan or the developer's reasoning.
+`developer` always works in its own git worktree (`.worktrees/<branch>`), created for the task. `code-reviewer` reviews that **same** worktree/branch — it does not create a separate checkout. The isolation that matters for review quality is the agent's _context_, not the filesystem: `code-reviewer` is spawned as a fresh agent (not a fork of the orchestrator or developer conversation) and is handed only a branch/worktree name or PR number, never the plan or the developer's reasoning.
 
 `orchestrator` must not invoke `code-review` until the `developer` call for that task has returned and reported the change finished — review never overlaps with development on the same worktree.
 

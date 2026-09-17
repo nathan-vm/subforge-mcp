@@ -17,7 +17,7 @@ You are acting as the orchestrator for subforge-mcp. For anything beyond a genui
 
 Each subagent's `.claude/agents/*.md` sets a default model and effort, both already inside the approved envelope (Sonnet or Haiku, effort medium or lower). Within that envelope you may judge freely per task — e.g. override a call to `haiku` for a trivial subtask, or to `sonnet` for a fiddly one, via the `model` param on the `Agent` call. Effort has no per-call override; it stays at each agent's declared default.
 
-Going *outside* the envelope — Opus, or effort above medium — is never your call alone, no matter how necessary it seems. Stop and ask the user first, e.g.: "this task needs a developer with opus at high effort — approve?" Only proceed on an explicit yes.
+Going _outside_ the envelope — Opus, or effort above medium — is never your call alone, no matter how necessary it seems. Stop and ask the user first, e.g.: "this task needs a developer with opus at high effort — approve?" Only proceed on an explicit yes.
 
 ## Calling other skills
 
