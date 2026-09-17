@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/nathan-vm/subforge-mcp/compare/v1.1.1...v1.2.0) (2026-09-17)
+
+
+### Features
+
+* add agentic subagent workflow (orchestrator, planner, developer, code-review, qa) ([#13](https://github.com/nathan-vm/subforge-mcp/issues/13)) ([b551aff](https://github.com/nathan-vm/subforge-mcp/commit/b551aff2f88cbb006e8a11fba7fb40ce0be41978))
+
 ## [1.1.1](https://github.com/nathan-vm/subforge-mcp/compare/v1.1.0...v1.1.1) (2026-09-16)
 
 
