@@ -29,3 +29,27 @@ pnpm run lint:fix
 - `release.yml` (push to main only): build, then `semantic-release` (version, changelog, GitHub release, npm publish). Checks out with a `RELEASE_TOKEN` secret (fine-grained PAT, Contents read/write) instead of the default token, because main's branch ruleset requires a PR for every update and the default `github-actions[bot]` identity can't bypass it — the PAT authenticates as a repo admin, who's on the ruleset's bypass list.
 
 Dependabot config (`dependabot.yml` + its auto-merge workflow) lives on the separate `dependabot-config` branch, not on `main` — see that branch's own PR.
+
+## Agentic workflow
+
+This repo uses a fixed set of Claude Code sub-agents (`.claude/agents/`) entered through matching skills (`.claude/skills/`). A `SessionStart` hook loads `orchestrator`'s guidance automatically — new sessions default to delegating rather than implementing inline. See [docs/adr/0001](docs/adr/0001-agentic-subagent-workflow.md) for why.
+
+| Skill          | Use it for                                                                                                                                                                                                                                    | Calls                                       |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `orchestrator` | Default entry point for any non-trivial feature/fix/refactor. Plans, dispatches, reviews, integrates.                                                                                                                                         | `planner`, `developer`, `code-review`, `qa` |
+| `planner`      | "What would it take to do X" — a read-only, file-grounded task breakdown, no code written.                                                                                                                                                    | none                                        |
+| `developer`    | Implementing one concrete, already-scoped task, in its own worktree (`.worktrees/<branch>`).                                                                                                                                                  | none                                        |
+| `code-review`  | Reviewing that same worktree once the developer subagent reports finished — zero developer context, never mid-development. `/code-review <branch>` works standalone too. See [docs/adr/0002](docs/adr/0002-isolated-worktree-code-review.md). | none                                        |
+| `qa`           | Runtime smoke-testing a user/tool-facing change (new/changed MCP tool behavior). Skip for refactors and internal-only changes.                                                                                                                | none                                        |
+
+Model/effort policy: each sub-agent's `.claude/agents/*.md` defaults to Sonnet or Haiku at `effort: medium` or lower. The orchestrator may freely pick Sonnet vs. Haiku per task within that envelope (via the `Agent` call's `model` override) — no approval needed. Going past the envelope (Opus, or effort above medium) always requires asking the user first; it's a cost/blast-radius decision, not a judgment call to make silently.
+
+Architecture decisions land in `docs/adr/` (one file per decision, `docs/adr/template.md` to start a new one) — check there before assuming _why_ something is structured a certain way.
+
+## MCP servers
+
+`.mcp.json` declares a project-scoped `github` MCP server for anyone who clones this repo without the GitHub MCP already configured globally. It reads its token from `${SUBFORGE_GITHUB_TOKEN}` (never hardcode a token into `.mcp.json` — it's committed). Set it locally with a PAT scoped to this repo, e.g. `export SUBFORGE_GITHUB_TOKEN=$(gh auth token)`.
+
+## Tooling
+
+- **rtk** condenses local command output for the assistant; it's configured at the user's global Claude Code profile level (not per-repo) — see the user's own setup, nothing repo-specific needed.
