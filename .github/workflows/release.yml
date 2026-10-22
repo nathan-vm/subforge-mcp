@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+  # Manual re-run against the current tip of main. Re-running a failed push
+  # run doesn't work once its release commit has landed: it checks out the
+  # old SHA, and semantic-release refuses to publish from a branch that's
+  # behind the remote.
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,6 +26,8 @@ permissions:
 jobs:
   release:
     name: Build and publish
+    # workflow_dispatch can target any branch; only main releases.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

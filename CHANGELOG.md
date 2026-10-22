@@ -1,10 +1,3 @@
-## [1.2.1](https://github.com/nathan-vm/subforge-mcp/compare/v1.2.0...v1.2.1) (2026-10-22)
-
-
-### Bug Fixes
-
-* **deps:** bump MCP SDK to 1.32.1 and refresh deps to clear audit advisories ([#22](https://github.com/nathan-vm/subforge-mcp/issues/22)) ([199d7fe](https://github.com/nathan-vm/subforge-mcp/commit/199d7fef595689733ffa87dbe14fcf44212968e9))
-
 # [1.2.0](https://github.com/nathan-vm/subforge-mcp/compare/v1.1.1...v1.2.0) (2026-09-17)
 
 
