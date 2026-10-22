@@ -1,3 +1,10 @@
+## [1.3.1](https://github.com/nathan-vm/subforge-mcp/compare/v1.3.0...v1.3.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* drop SUBFORGE_DECISION_MODEL env var in favor of per-call model ([#25](https://github.com/nathan-vm/subforge-mcp/issues/25)) ([62e4bc5](https://github.com/nathan-vm/subforge-mcp/commit/62e4bc59a63e933bcb6331d83e84b310cd2418f8))
+
 # [1.3.0](https://github.com/nathan-vm/subforge-mcp/compare/v1.2.1...v1.3.0) (2026-10-22)
 
 
