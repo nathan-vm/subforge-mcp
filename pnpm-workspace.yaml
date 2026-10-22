@@ -5,3 +5,9 @@ auditConfig:
     # semantic-release > micromatch, which only expands the repo's own static
     # globs in CI. Drop this entry once braces >=3.0.4 ships.
     - GHSA-vfj7-8cjw-p6xm
+updateConfig:
+  ignoreDependencies:
+    # Keep @types/node on the oldest supported runtime (engines.node >=22) so
+    # the typecheck rejects APIs newer Node versions added. Bump it together
+    # with engines.node, not on its own.
+    - "@types/node"
