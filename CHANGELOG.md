@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/nathan-vm/subforge-mcp/compare/v1.2.1...v1.3.0) (2026-10-22)
+
+
+### Features
+
+* support embedding and decision models alongside LLMs ([#24](https://github.com/nathan-vm/subforge-mcp/issues/24)) ([e8a96e0](https://github.com/nathan-vm/subforge-mcp/commit/e8a96e0282ba357c761542c16e314b613542ac12))
+
 ## [1.2.1](https://github.com/nathan-vm/subforge-mcp/compare/v1.2.0...v1.2.1) (2026-10-22)
 
 
