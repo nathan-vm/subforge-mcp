@@ -32,11 +32,10 @@ claude mcp add subforge -- npx -y subforge-mcp
 
 ## Configuration
 
-| Variable                       | Default                        | Notes                                                               |
-| ------------------------------ | ------------------------------ | ------------------------------------------------------------------- |
-| `LMSTUDIO_BASE_URL`            | `http://localhost:1234`        | Base URL of the LM Studio local server (REST + WebSocket)           |
-| `SUBFORGE_DECISION_MODEL`      | the only loaded decision model | Decision model used by `decide` / `ask_decision` / `eval_decisions` |
-| `SUBFORGE_DECISION_TIMEOUT_MS` | `30000`                        | Per-request timeout for `/v1/systemone` calls                       |
+| Variable                       | Default                 | Notes                                                     |
+| ------------------------------ | ----------------------- | --------------------------------------------------------- |
+| `LMSTUDIO_BASE_URL`            | `http://localhost:1234` | Base URL of the LM Studio local server (REST + WebSocket) |
+| `SUBFORGE_DECISION_TIMEOUT_MS` | `30000`                 | Per-request timeout for `/v1/systemone` calls             |
 
 ## MCP Tools
 

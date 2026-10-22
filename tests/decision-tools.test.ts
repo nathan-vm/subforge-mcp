@@ -119,6 +119,29 @@ test("decide reports no_decision_model_loaded / ambiguous_decision_model when it
   assert.equal((result.structuredContent as any).error.code, "ambiguous_decision_model");
 });
 
+test("decide uses the explicit model over other loaded decision models", async (t) => {
+  const bodies: any[] = [];
+  mockFetch(t, {
+    models: () =>
+      jsonResponse({
+        data: [decisionModel, { id: "other-decider", type: "decision", state: "loaded" }],
+      }),
+    systemOne: (body) => {
+      bodies.push(body);
+      return jsonResponse({
+        model: "other-decider",
+        answers: { decision: choiceAnswer({ postgres: 0.9, redis: 0.07, memory: 0.03 }) },
+      });
+    },
+  });
+  const { extra } = makeExtra();
+
+  const result = await decideHandler({ task: "t", options, model: "other-decider" }, extra);
+
+  assert.equal("isError" in result, false);
+  assert.equal(bodies[0].model, "other-decider");
+});
+
 test("decide maps a timeout to a structured timeout error", async (t) => {
   mockFetch(t, {
     models: () => jsonResponse({ data: [decisionModel] }),

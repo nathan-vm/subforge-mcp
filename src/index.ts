@@ -764,7 +764,6 @@ server.registerTool(
 // for a confident answer, and a session waiting on a decision never hangs.
 
 export const DECISION_TIMEOUT_MS = Number(process.env.SUBFORGE_DECISION_TIMEOUT_MS) || 30_000;
-const DEFAULT_DECISION_MODEL = process.env.SUBFORGE_DECISION_MODEL?.trim() || undefined;
 
 class DecisionToolError extends Error {
   readonly code: string;
@@ -801,13 +800,13 @@ export function describeDecisionError(err: unknown): DecisionErrorInfo {
 
 /**
  * Picks the decision model to use: the explicit argument, else
- * SUBFORGE_DECISION_MODEL, else the only loaded decision model. It must be
+ * the only loaded decision model. It must be
  * loaded already — /v1/systemone would otherwise JIT-load it.
  */
 export async function resolveDecisionModel(requested?: string): Promise<string> {
   const models = await getModels();
   const loadedDecision = models.filter((m) => m.state === "loaded" && m.type === "decision");
-  const wanted = requested?.trim() || DEFAULT_DECISION_MODEL;
+  const wanted = requested?.trim();
   const loadedList = loadedDecision.map((m) => m.id).join(", ") || "(none)";
 
   if (wanted) {
@@ -816,7 +815,7 @@ export async function resolveDecisionModel(requested?: string): Promise<string> 
       throw new DecisionToolError(
         "model_not_loaded",
         `Decision model '${wanted}' is not loaded in LM Studio (loaded decision models: ${loadedList}). ` +
-          `Load it with load_model first — decision tools never trigger an implicit load.`,
+          `Find one with list_models (include_unloaded) and load it with load_model first — decision tools never trigger an implicit load.`,
       );
     }
     if (match.type && match.type !== "decision") {
@@ -837,7 +836,7 @@ export async function resolveDecisionModel(requested?: string): Promise<string> 
   }
   throw new DecisionToolError(
     "ambiguous_decision_model",
-    `Several decision models are loaded (${loadedList}); pass model or set SUBFORGE_DECISION_MODEL.`,
+    `Several decision models are loaded (${loadedList}); pass model to pick one.`,
   );
 }
 
@@ -936,7 +935,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Decision model id; defaults to SUBFORGE_DECISION_MODEL, else the only loaded one",
+          "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.",
         ),
     },
   },
@@ -992,7 +991,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Decision model id; defaults to SUBFORGE_DECISION_MODEL, else the only loaded one",
+          "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.",
         ),
     },
   },
@@ -1152,7 +1151,7 @@ server.registerTool(
         .string()
         .optional()
         .describe(
-          "Decision model id; defaults to SUBFORGE_DECISION_MODEL, else the only loaded one",
+          "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.",
         ),
       target_accuracy: z
         .number()
