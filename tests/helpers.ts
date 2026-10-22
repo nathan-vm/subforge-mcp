@@ -49,6 +49,8 @@ export function mockFetch(
   handlers: {
     models?: () => Response | Promise<Response>;
     chatCompletions?: (body: any) => Response | Promise<Response>;
+    systemOne?: (body: any) => Response | Promise<Response>;
+    embeddings?: (body: any) => Response | Promise<Response>;
   },
 ): FetchCall[] {
   const calls: FetchCall[] = [];
@@ -59,10 +61,18 @@ export function mockFetch(
       if (!handlers.models) throw new Error(`Unexpected fetch call to ${url}`);
       return handlers.models();
     }
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
     if (url.endsWith("/v1/chat/completions")) {
       if (!handlers.chatCompletions) throw new Error(`Unexpected fetch call to ${url}`);
-      const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
       return handlers.chatCompletions(body);
+    }
+    if (url.endsWith("/v1/systemone")) {
+      if (!handlers.systemOne) throw new Error(`Unexpected fetch call to ${url}`);
+      return handlers.systemOne(body);
+    }
+    if (url.endsWith("/v1/embeddings")) {
+      if (!handlers.embeddings) throw new Error(`Unexpected fetch call to ${url}`);
+      return handlers.embeddings(body);
     }
     throw new Error(`Unmocked fetch call to ${url}`);
   });

@@ -4,6 +4,7 @@ import { __setLmStudioClientForTesting, loadModelHandler, server } from "../src/
 import { makeExtra } from "./helpers.ts";
 
 interface FakeDownloaded {
+  type?: "llm" | "embedding" | "decision";
   modelKey: string;
   path: string;
   sizeBytes: number;
@@ -19,18 +20,21 @@ function fakeClient(opts: {
   loaded?: FakeLoaded[];
   load?: (modelKey: string, options: unknown) => Promise<unknown>;
 }) {
+  const namespace = {
+    listLoaded: async () => opts.loaded ?? [],
+    load:
+      opts.load ??
+      (async () => {
+        throw new Error("load should not have been called");
+      }),
+  };
   return {
     system: {
-      listDownloadedModels: async () => opts.downloaded ?? [],
+      listDownloadedModels: async () => (opts.downloaded ?? []).map((m) => ({ type: "llm", ...m })),
     },
-    llm: {
-      listLoaded: async () => opts.loaded ?? [],
-      load:
-        opts.load ??
-        (async () => {
-          throw new Error("client.llm.load should not have been called");
-        }),
-    },
+    llm: namespace,
+    embedding: namespace,
+    decision: namespace,
   } as any;
 }
 
@@ -140,4 +144,36 @@ test("load_model rejects with a clear message when the model is not among downlo
     () => loadModelHandler({ model: "does-not-exist" }, extra),
     /was not found among downloaded LM Studio models/,
   );
+});
+
+test("load_model loads a decision model through the decision namespace after consent", async (t) => {
+  t.mock.method(server.server, "getClientCapabilities", () => ({ elicitation: {} }));
+  const elicitInput = t.mock.method(server.server, "elicitInput", async () => ({
+    action: "accept",
+    content: { confirm: true },
+  }));
+  const llmLoad = t.mock.fn(async () => {
+    throw new Error("the llm namespace should not be used for a decision model");
+  });
+  const decisionLoad = t.mock.fn(async (modelKey: string, _options?: unknown) => ({
+    identifier: modelKey,
+  }));
+  __setLmStudioClientForTesting({
+    system: {
+      listDownloadedModels: async () => [
+        { type: "decision", modelKey: "d1-3b", path: "/models/d1-3b", sizeBytes: 3_700_000_000 },
+      ],
+    },
+    llm: { listLoaded: async () => [], load: llmLoad },
+    embedding: { listLoaded: async () => [], load: llmLoad },
+    decision: { listLoaded: async () => [], load: decisionLoad },
+  } as any);
+  const { extra } = makeExtra();
+
+  const result = await loadModelHandler({ model: "d1-3b" }, extra);
+
+  assert.match(result.content[0].text, /decision model 'd1-3b' loaded successfully/);
+  assert.match((elicitInput.mock.calls[0].arguments[0] as any).message, /decision model/);
+  assert.equal(decisionLoad.mock.calls.length, 1);
+  assert.equal(llmLoad.mock.calls.length, 0);
 });
