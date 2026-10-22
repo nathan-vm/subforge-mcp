@@ -9,17 +9,28 @@ interface FakeLoaded {
   identifier: string;
 }
 
+const idleNamespace = {
+  listLoaded: async () => [],
+  unload: async () => {
+    throw new Error("unload should not have been called on this namespace");
+  },
+};
+
 function fakeClient(opts: {
   loaded?: FakeLoaded[];
   unload?: (identifier: string) => Promise<void>;
+  domain?: "llm" | "embedding" | "decision";
 }) {
   return {
-    llm: {
+    llm: idleNamespace,
+    embedding: idleNamespace,
+    decision: idleNamespace,
+    [opts.domain ?? "llm"]: {
       listLoaded: async () => opts.loaded ?? [],
       unload:
         opts.unload ??
         (async () => {
-          throw new Error("client.llm.unload should not have been called");
+          throw new Error("unload should not have been called");
         }),
     },
   } as any;
@@ -120,6 +131,8 @@ test("unload_model wraps SDK errors via describeLmStudioWsError", async () => {
 
 test("unload_model wraps a listLoaded SDK error via describeLmStudioWsError", async () => {
   __setLmStudioClientForTesting({
+    embedding: idleNamespace,
+    decision: idleNamespace,
     llm: {
       listLoaded: async () => {
         throw Object.assign(new Error(""), { code: "ECONNREFUSED" });
@@ -135,4 +148,21 @@ test("unload_model wraps a listLoaded SDK error via describeLmStudioWsError", as
     () => unloadModelHandler({ model: "m1" }, extra),
     /Cannot reach LM Studio.*WebSocket/,
   );
+});
+
+test("unload_model finds and unloads a decision model through the decision namespace", async () => {
+  const unload = test.mock.fn(async (_identifier: string) => {});
+  __setLmStudioClientForTesting(
+    fakeClient({
+      domain: "decision",
+      loaded: [{ modelKey: "d1-3b", path: "/models/d1-3b", identifier: "d1-3b" }],
+      unload,
+    }),
+  );
+  const { extra } = makeExtra();
+
+  const result = await unloadModelHandler({ model: "d1-3b" }, extra);
+
+  assert.match(result.content[0].text, /unloaded successfully/);
+  assert.equal(unload.mock.calls[0].arguments[0], "d1-3b");
 });

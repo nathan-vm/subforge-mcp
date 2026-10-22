@@ -7,7 +7,29 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { LMStudioClient, type LLM, type LLMInfo, type LoggerInterface } from "@lmstudio/sdk";
+import { LMStudioClient, type LoggerInterface, type ModelInfo } from "@lmstudio/sdk";
+import {
+  type DecideOption,
+  type EvalCase,
+  type JsonValue,
+  type Question,
+  type ScoredCase,
+  type SystemOneResponse,
+  accuracyByBand,
+  decideOptionsSchema,
+  decideQuestion,
+  decideState,
+  jsonValueSchema,
+  mapLimit,
+  parseEvalJsonl,
+  pct,
+  predictionFromAnswer,
+  questionSchema,
+  rankProbabilities,
+  readEvalFile,
+  statsAtThreshold,
+  suggestThreshold,
+} from "./decisions.ts";
 
 type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
@@ -47,20 +69,47 @@ interface ChatMessage {
 
 export const sessions = new Map<string, ChatMessage[]>();
 
+export class LmStudioRequestError extends Error {
+  readonly kind: "unreachable" | "timeout" | "http";
+  readonly status?: number;
+
+  constructor(message: string, kind: "unreachable" | "timeout" | "http", status?: number) {
+    super(message);
+    this.name = "LmStudioRequestError";
+    this.kind = kind;
+    this.status = status;
+  }
+}
+
+function isTimeout(err: unknown): boolean {
+  return err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+}
+
 export async function lmFetch(path: string, init?: RequestInit): Promise<any> {
   let res: Response;
   try {
     res = await fetch(`${BASE_URL}${path}`, init);
   } catch (err) {
-    throw new Error(
+    if (isTimeout(err)) {
+      throw new LmStudioRequestError(
+        `LM Studio at ${BASE_URL} did not answer ${path} in time.`,
+        "timeout",
+      );
+    }
+    throw new LmStudioRequestError(
       `Cannot reach LM Studio at ${BASE_URL}. Is the local server running (LM Studio > Developer > Start Server)? ${
         err instanceof Error ? err.message : String(err)
       }`,
+      "unreachable",
     );
   }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`LM Studio request failed: ${res.status} ${res.statusText} ${body}`);
+    throw new LmStudioRequestError(
+      `LM Studio request failed: ${res.status} ${res.statusText} ${body}`,
+      "http",
+      res.status,
+    );
   }
   return res.json();
 }
@@ -73,20 +122,70 @@ interface LMStudioModel {
   [key: string]: unknown;
 }
 
-export async function getLoadedModels(): Promise<LMStudioModel[]> {
+type ModelDomain = "llm" | "embedding" | "decision";
+
+const MODEL_DOMAINS: readonly ModelDomain[] = ["llm", "embedding", "decision"];
+
+/**
+ * LM Studio's REST listing names types differently from the SDK domains:
+ * vision LLMs are "vlm" (they chat like any LLM) and embedding models are
+ * "embeddings".
+ */
+function domainOf(model: LMStudioModel): ModelDomain | undefined {
+  if (model.type === "vlm") return "llm";
+  if (model.type === "embeddings") return "embedding";
+  return MODEL_DOMAINS.find((d) => d === model.type);
+}
+
+export async function getModels(): Promise<LMStudioModel[]> {
   const data = await lmFetch("/api/v0/models");
-  const models: LMStudioModel[] = data.data ?? [];
+  return data.data ?? [];
+}
+
+export async function getLoadedModels(): Promise<LMStudioModel[]> {
+  const models = await getModels();
   return models.filter((m) => m.state === "loaded");
 }
 
-// --- lmstudio-js (WebSocket) client, used ONLY by the load_model tool ---
+function describeModels(models: LMStudioModel[]): string {
+  return models.length
+    ? models.map((m) => (m.type ? `${m.id} (${m.type})` : m.id)).join(", ")
+    : "(none currently loaded)";
+}
+
+/**
+ * Throws unless `model` is loaded and (when LM Studio reports a type) belongs
+ * to `domain`. Every tool that sends inference to LM Studio goes through this
+ * first, because LM Studio's REST endpoints silently JIT-load an unloaded
+ * model — the implicit load this server never allows outside load_model.
+ */
+export async function requireLoadedModel(model: string, domain: ModelDomain): Promise<void> {
+  const loaded = await getLoadedModels();
+  const match = loaded.find((m) => m.id === model);
+  if (!match) {
+    throw new Error(
+      `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${describeModels(loaded)}. ` +
+        `Load '${model}' with load_model (or in the LM Studio app) first — this tool will not trigger an implicit load.`,
+    );
+  }
+  const actual = domainOf(match);
+  if (match.type && actual !== domain) {
+    throw new Error(
+      `Model '${model}' is a ${match.type} model, but this tool needs a model of type ${domain}. ` +
+        `Currently loaded models: ${describeModels(loaded)}.`,
+    );
+  }
+}
+
+// --- lmstudio-js (WebSocket) client, used ONLY by load_model / unload_model ---
 //
-// LM Studio's REST API has no explicit "load model" endpoint: hitting
-// /v1/chat/completions with an unloaded model silently JIT-loads it, which is
+// Hitting an inference endpoint (/v1/chat/completions, /v1/embeddings,
+// /v1/systemone) with an unloaded model silently JIT-loads it, which is
 // exactly the implicit behavior this server avoids elsewhere. The official
 // @lmstudio/sdk package talks to LM Studio over WebSocket and exposes an
-// explicit client.llm.load(...) with progress feedback, so it's the only
-// path used to bring a new model into memory — and only after elicitation.
+// explicit per-domain load (client.llm / client.embedding / client.decision)
+// with progress feedback and an idle TTL, so it's the only path used to bring
+// a new model into memory — and only after elicitation.
 
 const WS_BASE_URL = BASE_URL.replace(/^http/, "ws");
 
@@ -116,6 +215,26 @@ function getLmStudioClient(): LMStudioClient {
  */
 export function __setLmStudioClientForTesting(client: LMStudioClient | undefined): void {
   lmStudioClient = client;
+}
+
+interface LoadedInstance {
+  identifier: string;
+  modelKey: string;
+  path: string;
+}
+
+/** The slice of the SDK's per-domain namespace these tools use; identical across domains. */
+interface DomainNamespace {
+  listLoaded(): Promise<LoadedInstance[]>;
+  load(
+    modelKey: string,
+    opts: { ttl?: number; verbose?: boolean; onProgress?: (progress: number) => void },
+  ): Promise<LoadedInstance>;
+  unload(identifier: string): Promise<void>;
+}
+
+function namespaceFor(client: LMStudioClient, domain: ModelDomain): DomainNamespace {
+  return client[domain];
 }
 
 export function describeLmStudioWsError(err: unknown): string {
@@ -150,29 +269,50 @@ export const server = new McpServer(
   },
 );
 
-export async function listModelsHandler(_args: Record<string, never>, extra: ToolExtra) {
+function formatModelLine(m: LMStudioModel): string {
+  return m.type ? `${m.id} (${m.type})` : m.id;
+}
+
+export async function listModelsHandler(
+  { include_unloaded = false }: { include_unloaded?: boolean },
+  extra: ToolExtra,
+) {
   const notify = createStepNotifier(extra);
-  await notify("Checking LM Studio for loaded models...");
-  const loaded = await getLoadedModels();
-  await notify(`Found ${loaded.length} loaded model(s).`);
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: loaded.length
-          ? loaded.map((m) => m.id).join("\n")
-          : "No models are currently loaded in LM Studio. Load a model in the LM Studio app first, then try again.",
-      },
-    ],
-  };
+  await notify("Checking LM Studio for models...");
+  const models = await getModels();
+  const loaded = models.filter((m) => m.state === "loaded");
+  await notify(`Found ${loaded.length} loaded model(s) out of ${models.length} downloaded.`);
+
+  const sections = [
+    loaded.length
+      ? loaded.map(formatModelLine).join("\n")
+      : "No models are currently loaded in LM Studio. Load one with load_model (or in the LM Studio app) first.",
+  ];
+  if (include_unloaded) {
+    const unloaded = models.filter((m) => m.state !== "loaded");
+    sections.push(
+      unloaded.length
+        ? `Downloaded, not loaded:\n${unloaded.map(formatModelLine).join("\n")}`
+        : "Every downloaded model is loaded.",
+    );
+  }
+  return { content: [{ type: "text" as const, text: sections.join("\n\n") }] };
 }
 
 server.registerTool(
   "list_models",
   {
     title: "List LM Studio models",
-    description: "List models currently loaded into memory in the local LM Studio server.",
-    inputSchema: {},
+    description:
+      "List models loaded into memory in the local LM Studio server, with their type: llm/vlm " +
+      "(chat, delegate_task), embedding (rank_by_similarity) or decision (decide, ask_decision, " +
+      "eval_decisions). Set include_unloaded to also see downloaded models load_model can load.",
+    inputSchema: {
+      include_unloaded: z
+        .boolean()
+        .optional()
+        .describe("Also list downloaded models that are not loaded yet"),
+    },
   },
   listModelsHandler,
 );
@@ -200,16 +340,7 @@ export async function chatHandler(
   }
 
   await notify(`Verifying model '${model}' is loaded...`);
-  const loaded = await getLoadedModels();
-  if (!loaded.some((m) => m.id === model)) {
-    const loadedList = loaded.length
-      ? loaded.map((m) => m.id).join(", ")
-      : "(none currently loaded)";
-    throw new Error(
-      `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}. ` +
-        `Load '${model}' in the LM Studio app first — this tool will not trigger an implicit load.`,
-    );
-  }
+  await requireLoadedModel(model, "llm");
 
   history.push({ role: "user", content: message });
 
@@ -290,9 +421,9 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
   const client = getLmStudioClient();
 
   await notify(`Looking up downloaded LM Studio models to validate '${model}'...`);
-  let downloaded: LLMInfo[];
+  let downloaded: ModelInfo[];
   try {
-    downloaded = await client.system.listDownloadedModels("llm");
+    downloaded = await client.system.listDownloadedModels();
   } catch (err) {
     throw new Error(describeLmStudioWsError(err));
   }
@@ -300,17 +431,18 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
   const match = downloaded.find((m) => m.modelKey === model || m.path === model);
   if (!match) {
     const available = downloaded.length
-      ? downloaded.map((m) => m.modelKey).join(", ")
+      ? downloaded.map((m) => `${m.modelKey} (${m.type})`).join(", ")
       : "(none downloaded)";
     throw new Error(
       `Model '${model}' was not found among downloaded LM Studio models. Downloaded models: ${available}`,
     );
   }
+  const namespace = namespaceFor(client, match.type);
 
-  await notify(`Checking whether '${match.modelKey}' is already loaded...`);
-  let loadedInstances: LLM[];
+  await notify(`Checking whether ${match.type} model '${match.modelKey}' is already loaded...`);
+  let loadedInstances: LoadedInstance[];
   try {
-    loadedInstances = await client.llm.listLoaded();
+    loadedInstances = await namespace.listLoaded();
   } catch (err) {
     throw new Error(describeLmStudioWsError(err));
   }
@@ -333,7 +465,7 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
   const elicitResult = await server.server.elicitInput({
     mode: "form",
     message:
-      `Load model '${match.modelKey}' (${sizeGb} GB) into LM Studio memory? ` +
+      `Load ${match.type} model '${match.modelKey}' (${sizeGb} GB) into LM Studio memory? ` +
       `This will consume RAM/VRAM${
         ttl_seconds
           ? ` and will auto-unload after ${ttl_seconds}s of inactivity.`
@@ -367,9 +499,9 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
 
   await notify(`Loading '${match.modelKey}' into memory...`);
   let lastReportedPercent = -1;
-  let llm: LLM;
+  let instance: LoadedInstance;
   try {
-    llm = await client.llm.load(match.modelKey, {
+    instance = await namespace.load(match.modelKey, {
       ttl: ttl_seconds,
       verbose: false,
       onProgress: (progress) => {
@@ -384,14 +516,14 @@ export async function loadModelHandler({ model, ttl_seconds }: LoadModelArgs, ex
     throw new Error(describeLmStudioWsError(err));
   }
 
-  await notify(`Model '${llm.identifier}' loaded successfully.`);
+  await notify(`Model '${instance.identifier}' loaded successfully.`);
 
   return {
     content: [
       {
         type: "text" as const,
         text:
-          `Model '${match.modelKey}' loaded successfully as '${llm.identifier}'.` +
+          `${match.type} model '${match.modelKey}' loaded successfully as '${instance.identifier}'.` +
           (ttl_seconds ? ` It will auto-unload after ${ttl_seconds}s of inactivity.` : ""),
       },
     ],
@@ -403,7 +535,8 @@ server.registerTool(
   {
     title: "Load a model into LM Studio memory",
     description:
-      "Explicitly load a downloaded-but-not-yet-loaded model into LM Studio memory. Requires user " +
+      "Explicitly load a downloaded-but-not-yet-loaded model (llm, embedding or decision) into LM " +
+      "Studio memory. Requires user " +
       "consent via MCP elicitation before loading — this is the only tool in this server that can " +
       "bring a new model into memory. Refuses if the connected client does not support elicitation, " +
       "or if the user declines.",
@@ -433,19 +566,27 @@ export async function unloadModelHandler({ model }: UnloadModelArgs, extra: Tool
   const client = getLmStudioClient();
 
   await notify(`Checking whether '${model}' is loaded...`);
-  let loadedInstances: LLM[];
+  let loadedByDomain: { domain: ModelDomain; instances: LoadedInstance[] }[];
   try {
-    loadedInstances = await client.llm.listLoaded();
+    loadedByDomain = await Promise.all(
+      MODEL_DOMAINS.map(async (domain) => ({
+        domain,
+        instances: await namespaceFor(client, domain).listLoaded(),
+      })),
+    );
   } catch (err) {
     throw new Error(describeLmStudioWsError(err));
   }
 
-  const match = loadedInstances.find(
-    (m) => m.identifier === model || m.modelKey === model || m.path === model,
+  const loadedInstances = loadedByDomain.flatMap(({ domain, instances }) =>
+    instances.map((instance) => ({ domain, instance })),
   );
-  if (!match) {
+  const found = loadedInstances.find(
+    ({ instance: m }) => m.identifier === model || m.modelKey === model || m.path === model,
+  );
+  if (!found) {
     const loadedList = loadedInstances.length
-      ? loadedInstances.map((m) => m.identifier).join(", ")
+      ? loadedInstances.map(({ instance }) => instance.identifier).join(", ")
       : "(none currently loaded)";
     return {
       content: [
@@ -457,9 +598,10 @@ export async function unloadModelHandler({ model }: UnloadModelArgs, extra: Tool
     };
   }
 
+  const match = found.instance;
   await notify(`Unloading '${match.identifier}'...`);
   try {
-    await client.llm.unload(match.identifier);
+    await namespaceFor(client, found.domain).unload(match.identifier);
   } catch (err) {
     throw new Error(describeLmStudioWsError(err));
   }
@@ -517,6 +659,522 @@ server.registerTool(
     },
   },
   resetChatHandler,
+);
+
+// --- rank_by_similarity: embedding models ---
+
+export const MAX_SIMILARITY_DOCUMENTS = 200;
+
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return normA && normB ? dot / Math.sqrt(normA * normB) : 0;
+}
+
+function preview(text: string, max = 80): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+interface RankBySimilarityArgs {
+  query: string;
+  documents: string[];
+  model: string;
+  top_k?: number;
+}
+
+export async function rankBySimilarityHandler(
+  { query, documents, model, top_k = 10 }: RankBySimilarityArgs,
+  extra: ToolExtra,
+) {
+  const notify = createStepNotifier(extra);
+  await notify(`Verifying embedding model '${model}' is loaded...`);
+  await requireLoadedModel(model, "embedding");
+
+  await notify(`Embedding the query and ${documents.length} document(s)...`);
+  const data = await lmFetch("/v1/embeddings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, input: [query, ...documents] }),
+  });
+  const vectors: number[][] = [...(data.data ?? [])]
+    .sort((a: { index: number }, b: { index: number }) => a.index - b.index)
+    .map((d: { embedding: number[] }) => d.embedding);
+  if (vectors.length !== documents.length + 1) {
+    throw new Error(
+      `LM Studio returned ${vectors.length} embeddings for ${documents.length + 1} inputs.`,
+    );
+  }
+
+  const [queryVector, ...documentVectors] = vectors;
+  const ranked = documentVectors
+    .map((vector, index) => ({ index, score: cosine(queryVector, vector) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, top_k);
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: ranked
+          .map((r) => `${r.score.toFixed(4)}  #${r.index}  ${preview(documents[r.index])}`)
+          .join("\n"),
+      },
+    ],
+    structuredContent: { model, ranking: ranked },
+  };
+}
+
+server.registerTool(
+  "rank_by_similarity",
+  {
+    title: "Rank texts by semantic similarity",
+    description:
+      "Embed a query and a list of documents with a loaded LM Studio embedding model and return " +
+      "the documents ranked by cosine similarity to the query (score, original index, preview). " +
+      "Vectors stay inside this server; only the ranking enters the conversation.",
+    inputSchema: {
+      query: z.string().min(1).describe("Text to compare every document against"),
+      documents: z
+        .array(z.string().min(1))
+        .min(1)
+        .max(MAX_SIMILARITY_DOCUMENTS)
+        .describe("Candidate texts; results refer to them by their index in this array"),
+      model: z.string().describe("Loaded embedding model id (see list_models)"),
+      top_k: z.number().int().positive().optional().describe("How many results to return (10)"),
+    },
+  },
+  rankBySimilarityHandler,
+);
+
+// --- Decision models: decide / ask_decision / eval_decisions ---
+//
+// These talk to LM Studio's TypeSafe-compatible POST /v1/systemone, which
+// answers typed questions (choice / score / noul) with probabilities instead
+// of generated text. Unlike the other tools they never throw: any failure
+// (LM Studio down, model not loaded, timeout, bad response) comes back as a
+// structured `{ ok: false, error: { code, message } }` result with
+// probability 0, so a caller gating on probability can't mistake a failure
+// for a confident answer, and a session waiting on a decision never hangs.
+
+export const DECISION_TIMEOUT_MS = Number(process.env.SUBFORGE_DECISION_TIMEOUT_MS) || 30_000;
+const DEFAULT_DECISION_MODEL = process.env.SUBFORGE_DECISION_MODEL?.trim() || undefined;
+
+class DecisionToolError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
+export interface DecisionErrorInfo {
+  code: string;
+  message: string;
+}
+
+export function describeDecisionError(err: unknown): DecisionErrorInfo {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof DecisionToolError) return { code: err.code, message };
+  if (err instanceof LmStudioRequestError) {
+    if (err.kind === "unreachable") return { code: "lm_studio_unreachable", message };
+    if (err.kind === "timeout") {
+      return {
+        code: "timeout",
+        message: `${message} (limit ${DECISION_TIMEOUT_MS}ms, SUBFORGE_DECISION_TIMEOUT_MS)`,
+      };
+    }
+    if (err.status === 400) return { code: "invalid_request", message };
+    if (err.status === 501) return { code: "not_a_decision_model", message };
+    return { code: "lm_studio_error", message };
+  }
+  if (isTimeout(err)) return { code: "timeout", message };
+  return { code: "internal_error", message };
+}
+
+/**
+ * Picks the decision model to use: the explicit argument, else
+ * SUBFORGE_DECISION_MODEL, else the only loaded decision model. It must be
+ * loaded already — /v1/systemone would otherwise JIT-load it.
+ */
+export async function resolveDecisionModel(requested?: string): Promise<string> {
+  const models = await getModels();
+  const loadedDecision = models.filter((m) => m.state === "loaded" && m.type === "decision");
+  const wanted = requested?.trim() || DEFAULT_DECISION_MODEL;
+  const loadedList = loadedDecision.map((m) => m.id).join(", ") || "(none)";
+
+  if (wanted) {
+    const match = models.find((m) => m.id === wanted);
+    if (!match || match.state !== "loaded") {
+      throw new DecisionToolError(
+        "model_not_loaded",
+        `Decision model '${wanted}' is not loaded in LM Studio (loaded decision models: ${loadedList}). ` +
+          `Load it with load_model first — decision tools never trigger an implicit load.`,
+      );
+    }
+    if (match.type && match.type !== "decision") {
+      throw new DecisionToolError(
+        "not_a_decision_model",
+        `'${wanted}' is a ${match.type} model, not a decision model (loaded decision models: ${loadedList}).`,
+      );
+    }
+    return wanted;
+  }
+  if (loadedDecision.length === 1) return loadedDecision[0].id;
+  if (loadedDecision.length === 0) {
+    throw new DecisionToolError(
+      "no_decision_model_loaded",
+      "No decision model is loaded in LM Studio. Find one with list_models (include_unloaded) and " +
+        "load it with load_model.",
+    );
+  }
+  throw new DecisionToolError(
+    "ambiguous_decision_model",
+    `Several decision models are loaded (${loadedList}); pass model or set SUBFORGE_DECISION_MODEL.`,
+  );
+}
+
+export async function systemOne(
+  model: string,
+  state: JsonValue,
+  questions: Record<string, Question>,
+): Promise<SystemOneResponse> {
+  const data = await lmFetch("/v1/systemone", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model, state, questions }),
+    signal: AbortSignal.timeout(DECISION_TIMEOUT_MS),
+  });
+  if (!data?.answers || typeof data.answers !== "object") {
+    throw new DecisionToolError("unexpected_response", "LM Studio returned no answers object.");
+  }
+  return data as SystemOneResponse;
+}
+
+function jsonResult(payload: Record<string, unknown>, isError = false) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+interface DecideArgs {
+  task: string;
+  context?: string;
+  options: DecideOption[];
+  model?: string;
+}
+
+export async function decideHandler(
+  { task, context, options, model }: DecideArgs,
+  extra: ToolExtra,
+) {
+  const notify = createStepNotifier(extra);
+  try {
+    const resolved = await resolveDecisionModel(model);
+    await notify(`Asking '${resolved}' to choose among ${options.length} options...`);
+    const data = await systemOne(resolved, decideState(task, context), {
+      decision: decideQuestion(options),
+    });
+    const answer = data.answers.decision;
+    if (answer?.type !== "choice") {
+      throw new DecisionToolError("unexpected_response", "LM Studio returned no choice answer.");
+    }
+    const descriptions = new Map(options.map((o) => [o.id, o.description]));
+    return jsonResult({
+      ok: true,
+      model: data.model ?? resolved,
+      choice: answer.choice,
+      probability: answer.probabilities[answer.choice] ?? 0,
+      confidence: answer.confidence,
+      ranking: rankProbabilities(answer.probabilities).map((r) => ({
+        ...r,
+        description: descriptions.get(r.id),
+      })),
+    });
+  } catch (err) {
+    return jsonResult(
+      {
+        ok: false,
+        error: describeDecisionError(err),
+        choice: null,
+        probability: 0,
+        confidence: 0,
+        ranking: [],
+      },
+      true,
+    );
+  }
+}
+
+server.registerTool(
+  "decide",
+  {
+    title: "Pick between options with a local decision model",
+    description:
+      "Ask a loaded LM Studio decision model which of 2-6 options best accomplishes a task given " +
+      "some context. Returns the chosen option id, its probability, the model's confidence and the " +
+      "full ranking. Describe options neutrally — the wording is the whole input. Never throws: on " +
+      "any failure it returns ok:false with an error code and probability 0, so treat probability " +
+      "as the gate for acting on the answer.",
+    inputSchema: {
+      task: z.string().min(1).describe("What needs to be decided, in one or two sentences"),
+      context: z
+        .string()
+        .optional()
+        .describe("Constraints and product context that should drive the choice"),
+      options: decideOptionsSchema.describe("2-6 options, each {id, description}"),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "Decision model id; defaults to SUBFORGE_DECISION_MODEL, else the only loaded one",
+        ),
+    },
+  },
+  decideHandler,
+);
+
+interface AskDecisionArgs {
+  state: JsonValue;
+  questions: Record<string, Question>;
+  model?: string;
+}
+
+export async function askDecisionHandler(
+  { state, questions, model }: AskDecisionArgs,
+  extra: ToolExtra,
+) {
+  const notify = createStepNotifier(extra);
+  try {
+    const resolved = await resolveDecisionModel(model);
+    await notify(`Asking '${resolved}' ${Object.keys(questions).length} question(s)...`);
+    const data = await systemOne(resolved, state, questions);
+    return jsonResult({
+      ok: true,
+      model: data.model ?? resolved,
+      answers: data.answers,
+      input_tokens: data.usage?.input_tokens,
+    });
+  } catch (err) {
+    return jsonResult({ ok: false, error: describeDecisionError(err), answers: {} }, true);
+  }
+}
+
+server.registerTool(
+  "ask_decision",
+  {
+    title: "Ask a decision model raw typed questions",
+    description:
+      "Send typed questions about one state straight to a loaded LM Studio decision model " +
+      "(POST /v1/systemone) and get the raw answers with probabilities. Use it to prototype a " +
+      "question before relying on it. Types: choice (criteria = {option: description|null}), " +
+      "score (criteria = 2-10 ordered levels, lowest first) and noul (yes/no; optional criteria " +
+      "{true, false}). Question ids are not shown to the model, so put the meaning in " +
+      "instructions. Never throws: failures come back as ok:false with an error code.",
+    inputSchema: {
+      state: jsonValueSchema.describe("Content to judge: a string, or JSON with named parts"),
+      questions: z
+        .record(z.string(), questionSchema)
+        .refine((q) => Object.keys(q).length >= 1 && Object.keys(q).length <= 16, {
+          message: "Ask between 1 and 16 questions.",
+        })
+        .describe("Map of your question id to a question"),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "Decision model id; defaults to SUBFORGE_DECISION_MODEL, else the only loaded one",
+        ),
+    },
+  },
+  askDecisionHandler,
+);
+
+/** Errors after which asking the remaining eval cases would only repeat the failure. */
+const FATAL_EVAL_CODES = new Set([
+  "lm_studio_unreachable",
+  "timeout",
+  "not_a_decision_model",
+  "model_not_loaded",
+]);
+
+interface EvalDecisionsArgs {
+  path: string;
+  model?: string;
+  target_accuracy?: number;
+  min_support?: number;
+  current_threshold?: number;
+}
+
+export async function evalDecisionsHandler(
+  {
+    path: filePath,
+    model,
+    target_accuracy = 0.9,
+    min_support = 5,
+    current_threshold,
+  }: EvalDecisionsArgs,
+  extra: ToolExtra,
+) {
+  const notify = createStepNotifier(extra);
+  try {
+    const { cases, errors: parseErrors } = parseEvalJsonl(await readEvalFile(filePath));
+    if (cases.length === 0) {
+      throw new DecisionToolError(
+        "empty_dataset",
+        `No valid cases in '${filePath}'.${parseErrors.length ? ` ${parseErrors.slice(0, 5).join("; ")}` : ""}`,
+      );
+    }
+    const resolved = await resolveDecisionModel(model);
+    await notify(`Running ${cases.length} case(s) against '${resolved}'...`);
+
+    let fatal: DecisionErrorInfo | undefined;
+    const failures: { id: string; error: DecisionErrorInfo }[] = [];
+    const outcomes = await mapLimit(cases, 4, async (c: EvalCase): Promise<ScoredCase | null> => {
+      if (fatal) return null;
+      try {
+        const data = await systemOne(resolved, c.state, { q: c.question });
+        const answer = data.answers.q;
+        if (!answer) throw new DecisionToolError("unexpected_response", "No answer returned.");
+        const prediction = predictionFromAnswer(answer);
+        return {
+          id: c.id,
+          label: c.label,
+          predicted: prediction.label,
+          probability: prediction.probability,
+          correct: prediction.label === c.label,
+        };
+      } catch (err) {
+        const error = describeDecisionError(err);
+        failures.push({ id: c.id, error });
+        if (FATAL_EVAL_CODES.has(error.code)) fatal = error;
+        return null;
+      }
+    });
+    if (fatal) throw new DecisionToolError(fatal.code, `Eval aborted: ${fatal.message}`);
+
+    const scored = outcomes.filter((s): s is ScoredCase => s !== null);
+    if (scored.length === 0) {
+      throw new DecisionToolError(
+        failures[0]?.error.code ?? "internal_error",
+        `Every case failed. First error: ${failures[0]?.error.message ?? "unknown"}`,
+      );
+    }
+
+    const accuracy = scored.filter((s) => s.correct).length / scored.length;
+    const bands = accuracyByBand(scored);
+    const suggested = suggestThreshold(scored, target_accuracy, min_support);
+    const current =
+      current_threshold === undefined ? undefined : statsAtThreshold(scored, current_threshold);
+    const misses = scored
+      .filter((s) => !s.correct)
+      .sort((a, b) => b.probability - a.probability)
+      .slice(0, 5);
+
+    const lines = [
+      `${scored.length} case(s) scored with '${resolved}' — accuracy ${pct(accuracy)}`,
+      "",
+      "| probability | cases | accuracy |",
+      "| --- | --- | --- |",
+      ...bands.map((b) => `| ${b.band} | ${b.n} | ${pct(b.accuracy)} |`),
+      "",
+      suggested
+        ? `Suggested threshold: ${suggested.threshold.toFixed(2)} — acts alone on ${pct(suggested.coverage)} of cases with ${pct(suggested.accuracy)} accuracy (target ${pct(target_accuracy)}).`
+        : `No threshold reaches ${pct(target_accuracy)} accuracy over at least ${min_support} case(s); keep asking a human or collect more labeled cases.`,
+    ];
+    if (current) {
+      lines.push(
+        `Current threshold ${current.threshold.toFixed(2)}: acts alone on ${pct(current.coverage)} of cases with ${pct(current.accuracy)} accuracy.`,
+      );
+    }
+    if (scored.length < 30) {
+      lines.push(`Only ${scored.length} case(s): treat these numbers as a rough signal.`);
+    }
+    if (misses.length) {
+      lines.push(
+        "",
+        "Most confident misses:",
+        ...misses.map(
+          (m) => `- ${m.id}: picked ${m.predicted} (${m.probability.toFixed(2)}), label ${m.label}`,
+        ),
+      );
+    }
+    const skipped = [...parseErrors, ...failures.map((f) => `${f.id}: ${f.error.message}`)];
+    if (skipped.length) {
+      lines.push("", `Skipped ${skipped.length}:`, ...skipped.slice(0, 10).map((s) => `- ${s}`));
+    }
+
+    return {
+      content: [{ type: "text" as const, text: lines.join("\n") }],
+      structuredContent: {
+        ok: true,
+        model: resolved,
+        cases: scored.length,
+        accuracy,
+        bands,
+        suggested_threshold: suggested?.threshold ?? null,
+        suggested,
+        current: current ?? null,
+        skipped: skipped.length,
+      },
+    };
+  } catch (err) {
+    return jsonResult(
+      { ok: false, error: describeDecisionError(err), accuracy: 0, suggested_threshold: null },
+      true,
+    );
+  }
+}
+
+server.registerTool(
+  "eval_decisions",
+  {
+    title: "Measure a decision model against labeled cases",
+    description:
+      "Run every case in a labeled .jsonl file through a loaded LM Studio decision model and " +
+      "report overall accuracy, accuracy per probability band (0.5-0.6, 0.6-0.7, ...) and the " +
+      "lowest probability threshold whose auto-decisions reach target_accuracy. Each line is " +
+      "either a decide case {id?, task, context?, options: [{id, description}], label: <option " +
+      "id>} or a raw question case {id?, state, question, label}. Use it to set the threshold " +
+      "for acting on decide without asking a human.",
+    inputSchema: {
+      path: z.string().min(1).describe("Absolute path to the .jsonl dataset (max 5MB)"),
+      model: z
+        .string()
+        .optional()
+        .describe(
+          "Decision model id; defaults to SUBFORGE_DECISION_MODEL, else the only loaded one",
+        ),
+      target_accuracy: z
+        .number()
+        .min(0.5)
+        .max(1)
+        .optional()
+        .describe("Accuracy auto-decisions must reach (0.9)"),
+      min_support: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Minimum cases above a threshold before it can be suggested (5)"),
+      current_threshold: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("Threshold in use today, to compare against the suggestion"),
+    },
+  },
+  evalDecisionsHandler,
 );
 
 // --- delegate_task: a scoped, filesystem-grounded agentic loop that hands a ---
@@ -742,16 +1400,7 @@ export async function delegateTaskHandler(
   }
 
   await notify(`Verifying model '${model}' is loaded...`);
-  const loaded = await getLoadedModels();
-  if (!loaded.some((m) => m.id === model)) {
-    const loadedList = loaded.length
-      ? loaded.map((m) => m.id).join(", ")
-      : "(none currently loaded)";
-    throw new Error(
-      `Model '${model}' is not currently loaded in LM Studio. Currently loaded models: ${loadedList}. ` +
-        `Load '${model}' in the LM Studio app first.`,
-    );
-  }
+  await requireLoadedModel(model, "llm");
 
   const messages: any[] = [
     { role: "system", content: buildSystemPrompt(rootDir) },
