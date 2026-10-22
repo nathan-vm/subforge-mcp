@@ -1,2 +1,7 @@
-minimumReleaseAgeExclude:
-  - "@types/node@22.20.3"
+auditConfig:
+  ignoreGhsas:
+    # braces <=3.0.3 stack-exhaustion DoS (deeply nested patterns). No patched
+    # version is published yet (latest is 3.0.3). Dev-only, reached through
+    # semantic-release > micromatch, which only expands the repo's own static
+    # globs in CI. Drop this entry once braces >=3.0.4 ships.
+    - GHSA-vfj7-8cjw-p6xm
