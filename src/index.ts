@@ -798,10 +798,12 @@ export function describeDecisionError(err: unknown): DecisionErrorInfo {
   return { code: "internal_error", message };
 }
 
+const DECISION_MODEL_PARAM_DESCRIPTION =
+  "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.";
+
 /**
- * Picks the decision model to use: the explicit argument, else
- * the only loaded decision model. It must be
- * loaded already — /v1/systemone would otherwise JIT-load it.
+ * Picks the decision model: the explicit argument, else the only loaded one.
+ * It must already be loaded — /v1/systemone would otherwise JIT-load it.
  */
 export async function resolveDecisionModel(requested?: string): Promise<string> {
   const models = await getModels();
@@ -931,12 +933,7 @@ server.registerTool(
         .optional()
         .describe("Constraints and product context that should drive the choice"),
       options: decideOptionsSchema.describe("2-6 options, each {id, description}"),
-      model: z
-        .string()
-        .optional()
-        .describe(
-          "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.",
-        ),
+      model: z.string().optional().describe(DECISION_MODEL_PARAM_DESCRIPTION),
     },
   },
   decideHandler,
@@ -987,12 +984,7 @@ server.registerTool(
           message: "Ask between 1 and 16 questions.",
         })
         .describe("Map of your question id to a question"),
-      model: z
-        .string()
-        .optional()
-        .describe(
-          "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.",
-        ),
+      model: z.string().optional().describe(DECISION_MODEL_PARAM_DESCRIPTION),
     },
   },
   askDecisionHandler,
@@ -1147,12 +1139,7 @@ server.registerTool(
       "for acting on decide without asking a human.",
     inputSchema: {
       path: z.string().min(1).describe("Absolute path to the .jsonl dataset (max 5MB)"),
-      model: z
-        .string()
-        .optional()
-        .describe(
-          "Decision model id; defaults to the only loaded decision model. Find one with list_models (include_unloaded) and load it with load_model.",
-        ),
+      model: z.string().optional().describe(DECISION_MODEL_PARAM_DESCRIPTION),
       target_accuracy: z
         .number()
         .min(0.5)
